@@ -1,0 +1,4 @@
+backend/.env
+backend/test.py
+venv
+frontend/node_modules

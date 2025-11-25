@@ -1,37 +1,38 @@
 import axios from 'axios';
 
 const api = axios.create({
-  baseURL: 'http://localhost:5000/api', // Placeholder - will be configured later
-  headers: {
-    'Content-Type': 'application/json;charset=utf-8',
-    'Accept': 'application/json',
-  },
-
+  baseURL: 'http://localhost:5000/api',
 });
 
-// Request interceptor to add JWT token
+// Inject JWT automatically
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token');
+
+    // IMPORTANT:
+    // Only set JSON headers if request is NOT FormData
+    if (!(config.data instanceof FormData)) {
+      config.headers['Content-Type'] = 'application/json';
+      config.headers['Accept'] = 'application/json';
+    }
+
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+
     return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
-// Response interceptor to handle errors
+// Handle unauthorized responses
 api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      // Token expired or invalid
       localStorage.removeItem('token');
       localStorage.removeItem('user');
-      window.location.href = '/login';
+      window.location.href = '/login'; // force logout
     }
     return Promise.reject(error);
   }

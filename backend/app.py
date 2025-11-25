@@ -1,7 +1,9 @@
-# app.py
+# app.py (final)
 import os
 import datetime
 import json
+import base64
+import traceback
 from functools import wraps
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -10,6 +12,16 @@ from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
+
+from dotenv import load_dotenv
+load_dotenv()
+
+# Optional Gemini import (only used if GEMINI_API_KEY present)
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except Exception:
+    GEMINI_AVAILABLE = False
 
 # ---------- CONFIG ----------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +35,12 @@ DATABASE_URL = os.environ.get(
 )
 
 JWT_EXP_SECONDS = 60 * 60 * 24 * 7  # 7 days
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+# configure gemini if available and key present
+if GEMINI_AVAILABLE and GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 # ---------- APP & DB ----------
 app = Flask(__name__, static_folder=None)
@@ -32,12 +50,9 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["SECRET_KEY"] = SECRET_KEY
 
-
 db = SQLAlchemy(app)
 
 # ---------- MODELS (Match your MySQL DDL exactly) ----------
-# NOTE: table/column names exactly reflect your SQL schema provided earlier.
-
 class User(db.Model):
     __tablename__ = "users"
 
@@ -102,7 +117,7 @@ class Summary(db.Model):
     __tablename__ = "summaries"
     summary_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     upload_id = db.Column(db.Integer, db.ForeignKey("uploads.upload_id"), nullable=False, unique=True)
-    summary_text = db.Column(db.Text, nullable=False)
+    summary_text = db.Column(db.Text, nullable=False)  # JSON string
     llm_model_used = db.Column(db.String(100))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
@@ -144,12 +159,19 @@ class Notification(db.Model):
 
 # ---------- AUTH UTILITIES ----------
 def create_token(user):
+    """
+    Always store numeric user_id in sub (int) so lookups are consistent.
+    """
+    sub = int(user.user_id)
     payload = {
-        "sub": int(user.user_id),
+        "sub": sub,
         "role": user.role,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(seconds=JWT_EXP_SECONDS),
     }
     token = jwt.encode(payload, app.config["SECRET_KEY"], algorithm="HS256")
+    # PyJWT returns str on modern versions
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
     return token
 
 def decode_token(token):
@@ -164,21 +186,117 @@ def auth_required(roles=None):
         @wraps(f)
         def decorated(*args, **kwargs):
             header = request.headers.get("Authorization", "")
-            if not header.startswith("Bearer "):
+
+            # Normalize potential line breaks or weird spacing
+            header = header.replace("\n", " ").replace("\r", " ").strip()
+
+            parts = header.split()
+
+            if len(parts) != 2 or parts[0] != "Bearer":
                 return jsonify({"message": "Missing or invalid auth header"}), 401
-            token = header.split(" ", 1)[1]
+
+            token = parts[1]
             payload = decode_token(token)
+
             if not payload:
                 return jsonify({"message": "Invalid or expired token"}), 401
-            user = User.query.get(payload["sub"])
+
+            sub_lookup = payload.get("sub")
+            if isinstance(sub_lookup, str) and sub_lookup.isdigit():
+                sub_lookup = int(sub_lookup)
+
+            user = User.query.get(sub_lookup)
             if not user:
                 return jsonify({"message": "User not found"}), 401
+
             if roles and user.role not in roles:
                 return jsonify({"message": "Forbidden"}), 403
+
             request.current_user = user
             return f(*args, **kwargs)
         return decorated
     return decorator
+
+
+# ---------- OCR / Gemini helpers (optional, run only if GEMINI_API_KEY present) ----------
+def clean_json_text(text: str) -> dict:
+    """
+    Try to parse a response into JSON. Will attempt a few heuristics.
+    """
+    # naive: find first { and last } and json.loads
+    try:
+        start = text.find('{')
+        end = text.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            snippet = text[start:end+1]
+            return json.loads(snippet)
+    except Exception:
+        pass
+
+    # fallback: simple wrapped response
+    try:
+        return json.loads(text)
+    except Exception:
+        return {"raw": text}
+
+def run_gemini_pipeline(image_path: str) -> (str, dict):
+    """
+    Returns (ocr_text, analysis_json).
+    Requires GEMINI_API_KEY present and google.generativeai installed.
+    This is intentionally simple — adapt prompts/model as needed.
+    """
+    if not GEMINI_AVAILABLE or not GEMINI_API_KEY:
+        raise RuntimeError("Gemini not configured on server (GEMINI_API_KEY missing or package unavailable)")
+
+    model = genai.GenerativeModel(GEMINI_MODEL)
+
+    # read image bytes
+    with open(image_path, "rb") as f:
+        img_bytes = f.read()
+
+    image_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+    # 1) extract text
+    prompt_extract = (
+        "Extract the printed/handwritten text exactly from the following image. Return plain text only."
+    )
+    extract_resp = model.generate_content(
+        contents=[
+            {
+                "role": "user",
+                "parts": [
+                    {"text": prompt_extract},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}}
+                ],
+            }
+        ],
+    )
+    ocr_text = extract_resp.text.strip() if hasattr(extract_resp, "text") else str(extract_resp)
+
+    # 2) analyze and create a structured JSON
+    prompt_analyze = f"""
+You are a clinical assistant. Given the OCR text below from a prescription or report, return strict JSON with fields:
+- condition: short string or empty
+- medicines: list of objects {{ name, dosage, frequency, instructions (optional) }}
+- explanation: patient-friendly short instructions
+Return only JSON.
+OCR_TEXT:
+\"\"\"{ocr_text}\"\"\"
+"""
+    analyze_contents = [
+        {
+            "role": "user",
+            "parts": [
+                {"text": prompt_analyze}
+            ]
+        }
+    ]
+
+    analyze_resp = model.generate_content(contents=analyze_contents)
+
+    analysis_text = analyze_resp.text if hasattr(analyze_resp, "text") else str(analyze_resp)
+    analysis_json = clean_json_text(analysis_text)
+    return ocr_text, analysis_json
 
 # ---------- ROUTES ----------
 from flask import Blueprint
@@ -237,42 +355,63 @@ def login():
 @api.route("/upload", methods=["POST"])
 @auth_required(roles=["patient","doctor"])
 def upload_file():
-    # Accepts multipart/form-data with 'file' and upload_type
-    if "file" not in request.files:
-        return jsonify({"message": "No file part"}), 400
-    f = request.files["file"]
-    if f.filename == "":
-        return jsonify({"message": "No selected file"}), 400
-    upload_type = request.form.get("upload_type", "prescription")
-    filename = secure_filename(f.filename)
-    unique_name = f"{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{filename}"
-    path = os.path.join(app.config["UPLOAD_FOLDER"], unique_name)
-    f.save(path)
+    try:
+        # Accepts multipart/form-data with 'file' and upload_type, consent_cloud_ocr optional
+        if "file" not in request.files:
+            return jsonify({"message": "No file part"}), 400
+        f = request.files["file"]
+        if f.filename == "":
+            return jsonify({"message": "No selected file"}), 400
+        upload_type = request.form.get("upload_type", "prescription")
+        consent_flag = request.form.get("consent_cloud_ocr", "false").lower() == "true"
 
-    upload = Upload(
-        user_id=request.current_user.user_id,
-        file_path=path,
-        upload_type=upload_type,
-        consent_cloud_ocr=False,
-    )
-    db.session.add(upload)
-    db.session.commit()
+        filename = secure_filename(f.filename)
+        unique_name = f"{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{filename}"
+        path = os.path.join(app.config["UPLOAD_FOLDER"], unique_name)
+        f.save(path)
 
-    # create placeholder summary
-    placeholder = {
-        "medicines": [],
-        "condition": "Processing",
-        "explanation": "Your file has been uploaded and will be processed shortly."
-    }
-    summary = Summary(
-        upload_id=upload.upload_id,
-        summary_text=json.dumps(placeholder),
-        llm_model_used=None
-    )
-    db.session.add(summary)
-    db.session.commit()
+        upload = Upload(
+            user_id=request.current_user.user_id,
+            file_path=path,
+            upload_type=upload_type,
+            consent_cloud_ocr=consent_flag
+        )
+        db.session.add(upload)
+        db.session.commit()
 
-    return jsonify({"uploadId": upload.upload_id, "message": "File uploaded"}), 201
+        # placeholder summary
+        placeholder = {
+            "medicines": [],
+            "condition": "Processing",
+            "explanation": "Your file has been uploaded and will be processed shortly."
+        }
+        summary = Summary(
+            upload_id=upload.upload_id,
+            summary_text=json.dumps(placeholder),
+            llm_model_used=None
+        )
+        db.session.add(summary)
+        db.session.commit()
+
+        # If consented, run Gemini pipeline synchronously (for demo). In production, enqueue to worker.
+        if consent_flag:
+            try:
+                ocr_text, analysis_json = run_gemini_pipeline(path)
+                upload.ocr_text = ocr_text
+                upload.ocr_provider = 'gemini'
+                db.session.commit()
+
+                summary.summary_text = json.dumps(analysis_json)
+                summary.llm_model_used = GEMINI_MODEL if GEMINI_API_KEY else "gemini"
+                db.session.commit()
+            except Exception:
+                app.logger.exception("Gemini pipeline failed. Upload saved with placeholder summary.")
+
+        return jsonify({"uploadId": upload.upload_id, "message": "File uploaded"}), 201
+    except Exception as e:
+        app.logger.error("Upload failed: %s", str(e))
+        traceback.print_exc()
+        return jsonify({"message": "Server error", "error": str(e)}), 500
 
 @api.route("/upload/<int:upload_id>/summary", methods=["GET"])
 @auth_required(roles=["patient","doctor"])
@@ -297,11 +436,9 @@ def recommend_doctors():
     condition = request.args.get("condition", "")
     user_city = request.current_user.city or request.args.get("city") or ""
     # Lookup doctors who match city and specialization (simple contains)
-    # Join users & doctors
     q = db.session.query(User, Doctor).join(Doctor, Doctor.doctor_id==User.user_id).filter(User.city.ilike(f"%{user_city}%"))
     results = []
     for user, doc in q.all():
-        # simple match: condition in specialization or show all
         if condition and condition.lower() not in (doc.specialization or "").lower():
             continue
         results.append({
@@ -428,6 +565,7 @@ app.register_blueprint(api, url_prefix="/api")
 @app.cli.command("seed")
 def seed():
     """Seed a sample doctor user (if not exists)"""
+    # safe create_all for dev seed; comment out in production
     db.create_all()
     existing = User.query.filter_by(email="dr.joy@example.com").first()
     if existing:
@@ -437,7 +575,7 @@ def seed():
     user = User(name="Dr Joy", email="dr.joy@example.com", phone="9999999999", password_hash=pw, role="doctor", city="Mumbai")
     db.session.add(user)
     db.session.commit()
-    doc = Doctor(doctor_id=user.user_id, specialization="General", years_experience=8, rating=4.5, clinic_address="Mumbai Clinic", languages=json.dumps(["English"]))
+    doc = Doctor(doctor_id=user.user_id, specialization="General", years_experience=8, rating=4.5, clinic_address="Mumbai Clinic", languages=["English"])
     db.session.add(doc)
     # add a slot
     start = datetime.datetime.utcnow() + datetime.timedelta(days=1, hours=9)
@@ -448,8 +586,8 @@ def seed():
     print("Seeded doctor and slot")
 
 if __name__ == "__main__":
-    # Do NOT run db.create_all() by default if you already created tables via SQL DDL
-    # If you want SQLAlchemy to create tables, uncomment the following lines:
+    # DO NOT call db.create_all() automatically against an existing production DB.
+    # If you want SQLAlchemy to create tables in a fresh DB for local dev, uncomment:
     # with app.app_context():
     #     db.create_all()
     app.run(host="0.0.0.0", port=5000, debug=True)
