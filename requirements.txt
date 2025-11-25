@@ -1,0 +1,9 @@
+opencv-python
+numpy
+torchvision
+torchaudio
+easyocr
+transformers
+Pillow
+scispacy
+scispacy
