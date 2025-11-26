@@ -430,6 +430,123 @@ def get_summary(upload_id):
     except Exception:
         return jsonify({"summary_text": summary.summary_text}), 200
 
+@api.route("/upload-multiple", methods=["POST"])
+@auth_required(roles=["patient", "doctor"])
+def upload_multiple():
+    try:
+        print("\n====== MULTIPLE UPLOAD STARTED ======\n")
+
+        if "files" not in request.files:
+            return jsonify({"message": "No files provided"}), 400
+
+        files = request.files.getlist("files")
+        upload_type = request.form.get("upload_type", "prescription")
+        consent_flag = request.form.get("consent_cloud_ocr", "false").lower() == "true"
+
+        upload_ids = []
+
+        for f in files:
+            if f.filename == "":
+                continue
+
+            filename = secure_filename(f.filename)
+            unique_name = f"{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{filename}"
+            path = os.path.join(app.config["UPLOAD_FOLDER"], unique_name)
+            f.save(path)
+
+            # create upload entry
+            upload = Upload(
+                user_id=request.current_user.user_id,
+                file_path=path,
+                upload_type=upload_type,
+                consent_cloud_ocr=consent_flag
+            )
+            db.session.add(upload)
+            db.session.commit()
+            upload_ids.append(upload.upload_id)
+
+            # create placeholder summary
+            placeholder = {
+                "condition": "Processing",
+                "explanation": "Your file has been uploaded and will be processed shortly.",
+                "medicines": []
+            }
+
+            summary = Summary(
+                upload_id=upload.upload_id,
+                summary_text=json.dumps(placeholder),
+                llm_model_used=None
+            )
+            db.session.add(summary)
+            db.session.commit()
+
+            # ---- GEMINI PIPELINE ----
+            if consent_flag and GEMINI_AVAILABLE and GEMINI_API_KEY:
+                try:
+                    ocr_text, analysis_json = run_gemini_pipeline(path)
+
+                    upload.ocr_text = ocr_text
+                    upload.ocr_provider = "gemini"
+                    db.session.commit()
+
+                    summary.summary_text = json.dumps(analysis_json)
+                    summary.llm_model_used = GEMINI_MODEL
+                    db.session.commit()
+
+                    # medical entities
+                    if analysis_json.get("condition"):
+                        db.session.add(MedicalEntity(
+                            upload_id=upload.upload_id,
+                            type="CONDITION",
+                            text=analysis_json["condition"],
+                            normalized_value=analysis_json["condition"],
+                            confidence=1.0,
+                            source="gemini"
+                        ))
+
+                    for med in analysis_json.get("medicines", []):
+                        if med.get("name"):
+                            db.session.add(MedicalEntity(
+                                upload_id=upload.upload_id,
+                                type="DRUG",
+                                text=med["name"],
+                                normalized_value=med["name"],
+                                confidence=1.0,
+                                source="gemini"
+                            ))
+                        if med.get("dosage"):
+                            db.session.add(MedicalEntity(
+                                upload_id=upload.upload_id,
+                                type="DOSAGE",
+                                text=med["dosage"],
+                                normalized_value=med["dosage"],
+                                confidence=1.0,
+                                source="gemini"
+                            ))
+                        if med.get("frequency"):
+                            db.session.add(MedicalEntity(
+                                upload_id=upload.upload_id,
+                                type="FREQUENCY",
+                                text=med["frequency"],
+                                normalized_value=med["frequency"],
+                                confidence=1.0,
+                                source="gemini"
+                            ))
+
+                    db.session.commit()
+
+                except Exception as e:
+                    print("❌ Gemini failed for file:", f.filename)
+                    traceback.print_exc()
+                    db.session.rollback()
+
+        return jsonify({"uploads": upload_ids}), 201
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"message": "Server error", "error": str(e)}), 500
+
+
 @api.route("/recommend", methods=["GET"])
 @auth_required(roles=["patient"])
 def recommend_doctors():

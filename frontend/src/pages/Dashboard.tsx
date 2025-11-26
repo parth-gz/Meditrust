@@ -14,7 +14,6 @@ const Dashboard = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const [file, setFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
 
   // temporary dummy history (backend integration later)
@@ -23,43 +22,54 @@ const Dashboard = () => {
     { id: '2', type: 'Medical Report', date: '2024-01-10', status: 'Processed' },
   ]);
 
+  const [files, setFiles] = useState<File[]>([]);
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
+    if (e.target.files) {
+      setFiles(Array.from(e.target.files)); // store all selected files
+    } else {
+      setFiles([]);
     }
   };
 
   /** -----------------------------
-   *  Upload file -> hits /api/upload
+   *  Upload multiple files -> hits /api/upload-multiple
    *  The axios interceptor attaches:
    *  Authorization: Bearer <token>
    *  ----------------------------- */
   const handleUpload = async () => {
-    if (!file) {
-      toast.error('Please select a file first');
+    if (!files || files.length === 0) {
+      toast.error('Please select at least one file first');
       return;
     }
 
     setIsUploading(true);
 
     const formData = new FormData();
-    formData.append('file', file);
+    files.forEach((f) => formData.append('files', f)); // backend expects "files"
     formData.append('upload_type', 'prescription');
-    formData.append("consent_cloud_ocr", "true");
-
+    formData.append('consent_cloud_ocr', 'true');
 
     try {
-      const response = await api.post('/upload', formData); // no headers needed
-      toast.success('File uploaded successfully!');
+      const response = await api.post('/upload-multiple', formData);
+      toast.success('Files uploaded successfully!');
 
-      const uploadId = response.data.uploadId;
-      navigate(`/summary/${uploadId}`);
-
+      // backend returns { uploads: [id1, id2, ...] }
+      const uploads: number[] = response.data.uploads || [];
+      if (uploads.length > 0) {
+        // navigate to first summary
+        navigate(`/summary/${uploads[0]}`);
+      } else {
+        // fallback - show dashboard or history
+        toast.success('Uploaded but no IDs returned');
+      }
     } catch (error: any) {
       console.error(error);
-      toast.error(error.response?.data?.message || 'Upload failed');
+      toast.error(error?.response?.data?.message || 'Upload failed');
     } finally {
       setIsUploading(false);
+      // optionally clear selection
+      // setFiles([]);
     }
   };
 
@@ -70,12 +80,8 @@ const Dashboard = () => {
       <main className="flex-1 bg-background py-8">
         <div className="container mx-auto px-4">
           <div className="mb-8">
-            <h1 className="text-3xl font-bold text-foreground">
-              Welcome back, {user?.name}!
-            </h1>
-            <p className="text-muted-foreground">
-              Upload your prescriptions and medical reports
-            </p>
+            <h1 className="text-3xl font-bold text-foreground">Welcome back, {user?.name}!</h1>
+            <p className="text-muted-foreground">Upload your prescriptions and medical reports</p>
           </div>
 
           <div className="grid gap-6 md:grid-cols-2">
@@ -86,9 +92,7 @@ const Dashboard = () => {
                   <Upload className="h-5 w-5 text-primary" />
                   Upload Document
                 </CardTitle>
-                <CardDescription>
-                  Upload your prescription or medical report for analysis
-                </CardDescription>
+                <CardDescription>Upload your prescription or medical report for analysis</CardDescription>
               </CardHeader>
 
               <CardContent className="space-y-4">
@@ -98,22 +102,26 @@ const Dashboard = () => {
                   <Input
                     type="file"
                     accept="image/*,.pdf"
+                    multiple
                     onChange={handleFileChange}
                     className="mb-2"
                   />
 
-                  {file && (
-                    <p className="mt-2 text-sm text-muted-foreground">
-                      Selected: {file.name}
-                    </p>
+                  {files.length > 0 ? (
+                    <div className="mt-2 w-full text-sm text-muted-foreground">
+                      <p className="font-medium">Selected files:</p>
+                      <ul className="list-disc ml-5">
+                        {files.map((f, i) => (
+                          <li key={`${f.name}-${i}`}>{f.name}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-sm text-muted-foreground">No files selected</p>
                   )}
                 </div>
 
-                <Button
-                  onClick={handleUpload}
-                  disabled={!file || isUploading}
-                  className="w-full"
-                >
+                <Button onClick={handleUpload} disabled={files.length === 0 || isUploading} className="w-full">
                   {isUploading ? 'Uploading…' : 'Upload & Analyze'}
                 </Button>
               </CardContent>
