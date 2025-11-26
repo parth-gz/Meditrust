@@ -1,38 +1,54 @@
-import axios from 'axios';
+import axios, {
+  AxiosError,
+  InternalAxiosRequestConfig,
+  AxiosHeaders,
+} from "axios";
 
 const api = axios.create({
-  baseURL: 'http://localhost:5000/api',
+  baseURL: "http://localhost:5000/api",
 });
 
-// Inject JWT automatically
+// ----------------------
+// REQUEST INTERCEPTOR
+// ----------------------
 api.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem('token');
+  (config: InternalAxiosRequestConfig) => {
+    const token = localStorage.getItem("token");
 
-    // IMPORTANT:
-    // Only set JSON headers if request is NOT FormData
-    if (!(config.data instanceof FormData)) {
-      config.headers['Content-Type'] = 'application/json';
-      config.headers['Accept'] = 'application/json';
+    // Ensure headers ALWAYS exist and are correctly typed
+    if (!config.headers) {
+      config.headers = new AxiosHeaders();
+    } else if (!(config.headers instanceof AxiosHeaders)) {
+      config.headers = new AxiosHeaders(config.headers);
     }
 
+    // Attach JWT safely
     if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
+      config.headers.set("Authorization", `Bearer ${token}`);
+    }
+
+    const isFormData = config.data instanceof FormData;
+
+    if (!isFormData) {
+      config.headers.set("Content-Type", "application/json");
+      config.headers.set("Accept", "application/json");
     }
 
     return config;
   },
-  (error) => Promise.reject(error)
+  (error: AxiosError) => Promise.reject(error)
 );
 
-// Handle unauthorized responses
+// ----------------------
+// RESPONSE INTERCEPTOR
+// ----------------------
 api.interceptors.response.use(
-  (response) => response,
-  (error) => {
+  (res) => res,
+  (error: AxiosError) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      window.location.href = '/login'; // force logout
+      localStorage.removeItem("token");
+      localStorage.removeItem("user");
+      window.location.href = "/login";
     }
     return Promise.reject(error);
   }
