@@ -162,7 +162,7 @@ def create_token(user):
     """
     Always store numeric user_id in sub (int) so lookups are consistent.
     """
-    sub = int(user.user_id)
+    sub = str(user.user_id)
     payload = {
         "sub": sub,
         "role": user.role,
@@ -545,6 +545,29 @@ def upload_multiple():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"message": "Server error", "error": str(e)}), 500
+
+@api.route("/uploads/my", methods=["GET"])
+@auth_required(roles=["patient","doctor"])
+def get_my_uploads():
+    uploads = (
+        Upload.query
+        .filter_by(user_id=request.current_user.user_id)
+        .order_by(Upload.created_at.desc())
+        .all()
+    )
+
+    out = []
+    for u in uploads:
+        out.append({
+            "upload_id": u.upload_id,
+            "type": u.upload_type,
+            "file_name": u.file_path.split("/")[-1],
+            "created_at": u.created_at.isoformat(),
+            "status": "Processed" if u.ocr_text else "Uploaded"
+        })
+
+    return jsonify(out), 200
+
 
 
 @api.route("/recommend", methods=["GET"])
