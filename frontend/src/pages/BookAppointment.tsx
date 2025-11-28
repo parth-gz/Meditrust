@@ -1,160 +1,91 @@
-import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Calendar, Clock, User, CheckCircle } from 'lucide-react';
-import api from '@/lib/axios';
-import Navbar from '@/components/Navbar';
-import Footer from '@/components/Footer';
-import LoadingSpinner from '@/components/LoadingSpinner';
-import { toast } from 'sonner';
+// frontend/src/pages/BookAppointment.tsx
 
-interface SlotDetails {
-  id: string;
-  date: string;
-  startTime: string;
-  duration: number;
-  doctor: {
-    name: string;
-    specialization: string;
-    clinicAddress: string;
-  };
+import { useEffect, useState } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import api from "@/lib/axios";
+import Navbar from "@/components/Navbar";
+import Footer from "@/components/Footer";
+import LoadingSpinner from "@/components/LoadingSpinner";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { toast } from "sonner";
+
+interface Slot {
+  slot_id: number;
+  slot_start: string;
+  slot_end: string;
+  doctor_name: string;
+  doctor_specialization: string;
+  clinic_address: string;
 }
 
 const BookAppointment = () => {
   const { slotId } = useParams();
   const navigate = useNavigate();
-  const [slot, setSlot] = useState<SlotDetails | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isBooking, setIsBooking] = useState(false);
+
+  const [slot, setSlot] = useState<Slot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [booking, setBooking] = useState(false);
 
   useEffect(() => {
-    const fetchSlotDetails = async () => {
+    const load = async () => {
       try {
-        // In real app, fetch slot details by ID
-        // For now, using mock data
-        setSlot({
-          id: slotId!,
-          date: '2024-01-20',
-          startTime: '10:00 AM',
-          duration: 30,
-          doctor: {
-            name: 'Dr. Sarah Johnson',
-            specialization: 'Cardiologist',
-            clinicAddress: '123 Medical Center, Mumbai',
-          },
-        });
-      } catch (error) {
-        console.error('Failed to fetch slot details', error);
+        const res = await api.get(`/slots/${slotId}`);
+        setSlot(res.data);
+      } catch (err) {
+        console.error(err);
       } finally {
-        setIsLoading(false);
+        setLoading(false);
       }
     };
-
-    fetchSlotDetails();
+    load();
   }, [slotId]);
 
-  const handleBooking = async () => {
-    setIsBooking(true);
-
+  const handleBook = async () => {
+    setBooking(true);
     try {
-      const response = await api.post('/book-appointment', {
-        slotId: slot?.id,
-      });
-      toast.success('Appointment booked successfully!');
-      navigate(`/appointment-success?id=${response.data.appointmentId}`);
+      const res = await api.post("/appointments", { slot_id: slot?.slot_id });
+      toast.success("Appointment booked!");
+      navigate(`/appointment-success?id=${res.data.appointment_id}`);
     } catch (error: any) {
-      toast.error(error.message || 'Failed to book appointment');
+      toast.error(error.response?.data?.message || "Booking failed");
     } finally {
-      setIsBooking(false);
+      setBooking(false);
     }
   };
 
-  if (isLoading) return <LoadingSpinner />;
+  if (loading) return <LoadingSpinner />;
 
-  if (!slot) {
+  if (!slot)
     return (
-      <div className="flex min-h-screen flex-col">
+      <div>
         <Navbar />
-        <div className="flex flex-1 items-center justify-center">
-          <p className="text-muted-foreground">Slot not found</p>
-        </div>
+        <div className="p-10 text-center">Slot not found</div>
         <Footer />
       </div>
     );
-  }
 
   return (
     <div className="flex min-h-screen flex-col">
       <Navbar />
 
-      <main className="flex-1 bg-background py-8">
-        <div className="container mx-auto max-w-2xl px-4">
-          <div className="mb-8 text-center">
-            <h1 className="text-3xl font-bold text-foreground">Confirm Appointment</h1>
-            <p className="text-muted-foreground">Review and confirm your booking</p>
-          </div>
+      <main className="flex-1 container mx-auto py-10 px-4">
+        <Card>
+          <CardHeader>
+            <CardTitle>Confirm Appointment</CardTitle>
+          </CardHeader>
 
-          <Card className="shadow-lg">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <CheckCircle className="h-5 w-5 text-primary" />
-                Appointment Details
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              {/* Doctor Info */}
-              <div className="rounded-lg bg-secondary/30 p-4">
-                <div className="mb-2 flex items-center gap-2 text-primary">
-                  <User className="h-5 w-5" />
-                  <span className="font-semibold">Doctor</span>
-                </div>
-                <p className="text-lg font-medium text-foreground">{slot.doctor.name}</p>
-                <p className="text-sm text-muted-foreground">{slot.doctor.specialization}</p>
-                <p className="mt-2 text-sm text-muted-foreground">{slot.doctor.clinicAddress}</p>
-              </div>
+          <CardContent>
+            <p><strong>Doctor:</strong> {slot.doctor_name}</p>
+            <p><strong>Specialization:</strong> {slot.doctor_specialization}</p>
+            <p><strong>Clinic:</strong> {slot.clinic_address}</p>
+            <p><strong>Time:</strong> {new Date(slot.slot_start).toLocaleString()}</p>
 
-              {/* Date & Time */}
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="rounded-lg bg-secondary/30 p-4">
-                  <div className="mb-2 flex items-center gap-2 text-primary">
-                    <Calendar className="h-5 w-5" />
-                    <span className="font-semibold">Date</span>
-                  </div>
-                  <p className="text-lg font-medium text-foreground">{slot.date}</p>
-                </div>
-
-                <div className="rounded-lg bg-secondary/30 p-4">
-                  <div className="mb-2 flex items-center gap-2 text-primary">
-                    <Clock className="h-5 w-5" />
-                    <span className="font-semibold">Time</span>
-                  </div>
-                  <p className="text-lg font-medium text-foreground">
-                    {slot.startTime} ({slot.duration} min)
-                  </p>
-                </div>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="flex gap-3 pt-4">
-                <Button
-                  variant="outline"
-                  className="flex-1"
-                  onClick={() => navigate(-1)}
-                >
-                  Go Back
-                </Button>
-                <Button
-                  className="flex-1"
-                  onClick={handleBooking}
-                  disabled={isBooking}
-                >
-                  {isBooking ? 'Booking...' : 'Confirm Booking'}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+            <Button className="w-full mt-6" disabled={booking} onClick={handleBook}>
+              {booking ? "Booking..." : "Confirm Appointment"}
+            </Button>
+          </CardContent>
+        </Card>
       </main>
 
       <Footer />

@@ -1,3 +1,5 @@
+// frontend/src/pages/DoctorRecommendation.tsx
+
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -9,7 +11,7 @@ import Footer from '@/components/Footer';
 import LoadingSpinner from '@/components/LoadingSpinner';
 
 interface Doctor {
-  id: number;                 // changed from string → number
+  id: number;                
   name: string;
   specialization: string;
   rating: number;
@@ -29,9 +31,9 @@ const DoctorRecommendation = () => {
       try {
         const response = await api.get(`/recommend?condition=${condition}`);
 
-        // 🔥 FIX: backend returns user_id → frontend expects id
+        // 🔥 FIX: Use doctor.doctor_id from backend
         const mapped = response.data.map((doc: any) => ({
-          id: doc.user_id,
+          id: doc.doctor_id,               // correct field
           name: doc.name,
           specialization: doc.specialization,
           rating: doc.rating,

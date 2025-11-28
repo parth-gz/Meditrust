@@ -1,4 +1,4 @@
-# app.py (final)
+# app.py (cleaned, deduped) - Appointments start as PENDING
 import os
 import datetime
 import json
@@ -110,7 +110,7 @@ class MedicalEntity(db.Model):
     text = db.Column(db.String(255), nullable=False)
     normalized_value = db.Column(db.String(255))
     confidence = db.Column(db.Float)
-    source = db.Column(db.Enum('med7','bioclinicalbert','regex'))
+    source = db.Column(db.Enum('med7','bioclinicalbert','regex','gemini'))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
 class Summary(db.Model):
@@ -217,7 +217,6 @@ def auth_required(roles=None):
             return f(*args, **kwargs)
         return decorated
     return decorator
-
 
 # ---------- OCR / Gemini helpers (optional, run only if GEMINI_API_KEY present) ----------
 def clean_json_text(text: str) -> dict:
@@ -443,8 +442,6 @@ def get_summary(upload_id):
 @auth_required(roles=["patient", "doctor"])
 def upload_multiple():
     try:
-        print("\n====== MULTIPLE UPLOAD STARTED ======\n")
-
         if "files" not in request.files:
             return jsonify({"message": "No files provided"}), 400
 
@@ -463,7 +460,6 @@ def upload_multiple():
             path = os.path.join(app.config["UPLOAD_FOLDER"], unique_name)
             f.save(path)
 
-            # create upload entry
             upload = Upload(
                 user_id=request.current_user.user_id,
                 file_path=path,
@@ -474,7 +470,6 @@ def upload_multiple():
             db.session.commit()
             upload_ids.append(upload.upload_id)
 
-            # create placeholder summary
             placeholder = {
                 "condition": "Processing",
                 "explanation": "Your file has been uploaded and will be processed shortly.",
@@ -544,8 +539,7 @@ def upload_multiple():
 
                     db.session.commit()
 
-                except Exception as e:
-                    print("❌ Gemini failed for file:", f.filename)
+                except Exception:
                     traceback.print_exc()
                     db.session.rollback()
 
@@ -580,14 +574,10 @@ def get_my_uploads():
 @api.route("/recommend", methods=["GET"])
 @auth_required(roles=["patient"])
 def recommend_doctors():
-    # -----------------------------
-    # 1. Fetch patient's city
-    # -----------------------------
+    # 1) fetch patient city
     user_city = request.current_user.city or request.args.get("city") or ""
 
-    # -----------------------------
-    # 2. Try to fetch the latest summary → get recommended_specialist
-    # -----------------------------
+    # 2) try to get recommended_specialist from latest summary
     latest_summary = Summary.query \
         .join(Upload, Upload.upload_id == Summary.upload_id) \
         .filter(Upload.user_id == request.current_user.user_id) \
@@ -595,7 +585,6 @@ def recommend_doctors():
         .first()
 
     recommended_specialist = None
-
     if latest_summary:
         try:
             summary_json = json.loads(latest_summary.summary_text)
@@ -603,40 +592,26 @@ def recommend_doctors():
         except Exception:
             pass
 
-    # -----------------------------
-    # 3. Fallback if JSON didn't contain it
-    # -----------------------------
-    # Allow frontend to override manually
+    # 3) fallback: query param
     if not recommended_specialist:
         recommended_specialist = request.args.get("specialist")
 
-    # If still nothing, fallback to simple query param "condition"
     condition = request.args.get("condition")
     if not recommended_specialist and condition:
-        # Use condition to match specializations
         recommended_specialist = condition
 
-    # -----------------------------
-    # 4. Build doctor query
-    # -----------------------------
+    # 4) build doctor query
     q = (
         db.session.query(User, Doctor)
         .join(Doctor, Doctor.doctor_id == User.user_id)
         .filter(User.city.ilike(f"%{user_city}%"))
     )
 
-    # If we have a specialist → filter by specialization
     if recommended_specialist:
-        q = q.filter(
-            Doctor.specialization.ilike(f"%{recommended_specialist}%")
-        )
+        q = q.filter(Doctor.specialization.ilike(f"%{recommended_specialist}%"))
 
-    # Sort doctors by rating (high → low)
     q = q.order_by(Doctor.rating.desc())
 
-    # -----------------------------
-    # 5. Format response
-    # -----------------------------
     results = []
     for user, doc in q.all():
         results.append({
@@ -652,9 +627,7 @@ def recommend_doctors():
             "consultationFee": float(doc.consultation_fee or 0)
         })
 
-    # -----------------------------
-    # 6. Log recommendation
-    # -----------------------------
+    # log recommendation
     log = DoctorRecommendation(
         user_id=request.current_user.user_id,
         user_condition=recommended_specialist or condition,
@@ -666,63 +639,98 @@ def recommend_doctors():
 
     return jsonify(results), 200
 
+# -------------------------
+# Doctor profile & slots (single canonical implementations)
+# -------------------------
 @api.route("/doctor/<int:doctor_id>", methods=["GET"])
 @auth_required(roles=["patient","doctor"])
-def get_doctor_profile(doctor_id):
+def doctor_profile_route(doctor_id):
     doc = Doctor.query.get(doctor_id)
     if not doc:
         return jsonify({"message": "Doctor not found"}), 404
     user = User.query.get(doctor_id)
-    slots = DoctorSlot.query.filter_by(doctor_id=doctor_id).all()
+
+    slots = DoctorSlot.query.filter_by(doctor_id=doctor_id).order_by(DoctorSlot.slot_start.asc()).all()
     slots_out = [{
         "slot_id": s.slot_id,
         "slot_start": s.slot_start.isoformat(),
         "slot_end": s.slot_end.isoformat(),
         "is_booked": s.is_booked
     } for s in slots]
+
     doc_info = {
         "doctor_id": doc.doctor_id,
         "name": user.name if user else None,
         "specialization": doc.specialization,
         "rating": float(doc.rating or 0),
-        "experience": int(doc.years_experience or 0),
+        "years_experience": int(doc.years_experience or 0),
         "languages": doc.languages or [],
-        "clinicAddress": doc.clinic_address,
+        "clinic_address": doc.clinic_address,
         "city": user.city if user else None,
-        "consultationFee": float(doc.consultation_fee or 0),
+        "consultation_fee": float(doc.consultation_fee or 0),
+        "bio": doc.bio,
         "slots": slots_out
     }
     return jsonify(doc_info), 200
 
 @api.route("/doctor/<int:doctor_id>/slots", methods=["GET"])
 @auth_required(roles=["patient", "doctor"])
-def get_doctor_slots(doctor_id):
-    slots = DoctorSlot.query.filter_by(doctor_id=doctor_id).all()
+def doctor_slots_route(doctor_id):
+    slots = DoctorSlot.query.filter_by(doctor_id=doctor_id).order_by(DoctorSlot.slot_start.asc()).all()
 
     output = []
     for s in slots:
         output.append({
-            "id": s.slot_id,
-            "date": s.slot_start.date().isoformat(),
-            "startTime": s.slot_start.strftime("%I:%M %p"),
-            "duration": int((s.slot_end - s.slot_start).total_seconds() // 60),
-            "available": not s.is_booked
+            "slot_id": s.slot_id,
+            "slot_start": s.slot_start.isoformat(),
+            "slot_end": s.slot_end.isoformat(),
+            "is_booked": s.is_booked
         })
 
     return jsonify(output), 200
 
+@api.route("/slots/<int:slot_id>", methods=["GET"])
+@auth_required(roles=["patient", "doctor"])
+def slot_details_route(slot_id):
+    slot = DoctorSlot.query.get(slot_id)
+    if not slot:
+        return jsonify({"message": "Slot not found"}), 404
 
+    doctor = Doctor.query.get(slot.doctor_id)
+    user = User.query.get(slot.doctor_id)
+
+    return jsonify({
+        "slot_id": slot.slot_id,
+        "slot_start": slot.slot_start.isoformat(),
+        "slot_end": slot.slot_end.isoformat(),
+        "doctor_name": user.name if user else None,
+        "doctor_specialization": doctor.specialization if doctor else None,
+        "clinic_address": doctor.clinic_address if doctor else None
+    }), 200
+
+# -------------------------
+# Add slot (doctor)
+# -------------------------
 @api.route("/doctor/add-slot", methods=["POST"])
 @auth_required(roles=["doctor"])
-def add_slot():
+def doctor_addslot_route():
     data = request.json or {}
-    slot_start = data.get("slot_start")  # expects ISO datetime string
+    # Support both ISO datetimes and date + time fields
+    slot_start = data.get("slot_start")
     slot_end = data.get("slot_end")
-    if not slot_start or not slot_end:
-        return jsonify({"message": "slot_start and slot_end required"}), 400
+    date = data.get("date")
+    start_time = data.get("startTime")
+    duration = int(data.get("duration", 30))
+
     try:
-        s_start = datetime.datetime.fromisoformat(slot_start)
-        s_end = datetime.datetime.fromisoformat(slot_end)
+        if slot_start and slot_end:
+            s_start = datetime.datetime.fromisoformat(slot_start)
+            s_end = datetime.datetime.fromisoformat(slot_end)
+        elif date and start_time:
+            s_start = datetime.datetime.fromisoformat(f"{date}T{start_time}")
+            s_end = s_start + datetime.timedelta(minutes=duration)
+        else:
+            return jsonify({"message": "Provide slot_start/slot_end ISO or date + startTime"}), 400
     except Exception:
         return jsonify({"message": "Invalid datetime format. Use ISO format."}), 400
 
@@ -731,30 +739,69 @@ def add_slot():
     db.session.commit()
     return jsonify({"message": "Slot added", "slot_id": slot.slot_id}), 201
 
-@api.route("/book-appointment", methods=["POST"])
+# -------------------------
+# Book appointment (patient) - starts as PENDING
+# -------------------------
+@api.route("/appointments", methods=["POST"])
 @auth_required(roles=["patient"])
-def book_appointment():
+def appointments_create_route():
     data = request.json or {}
     slot_id = data.get("slot_id")
     if not slot_id:
         return jsonify({"message": "slot_id required"}), 400
+
     slot = DoctorSlot.query.get(slot_id)
     if not slot or slot.is_booked:
         return jsonify({"message": "Slot not available"}), 400
+
+    # mark slot booked, create appointment as pending
+    slot.is_booked = True
     appt = Appointment(
         patient_id=request.current_user.user_id,
         doctor_id=slot.doctor_id,
         slot_id=slot.slot_id,
-        status="confirmed"
+        status="pending"
     )
-    slot.is_booked = True
     db.session.add(appt)
     db.session.commit()
+
     return jsonify({"appointment_id": appt.appointment_id}), 201
 
+# -------------------------
+# Doctor: list appointments
+# -------------------------
+@api.route("/doctor/appointments", methods=["GET"])
+@auth_required(roles=["doctor"])
+def doctor_appointments_route():
+    doctor_id = request.current_user.user_id
+
+    appointments = (
+        Appointment.query
+        .filter_by(doctor_id=doctor_id)
+        .order_by(Appointment.created_at.desc())
+        .all()
+    )
+
+    out = []
+    for a in appointments:
+        slot = DoctorSlot.query.get(a.slot_id)
+        patient = User.query.get(a.patient_id)
+        out.append({
+            "appointment_id": a.appointment_id,
+            "patient_name": patient.name if patient else None,
+            "date": slot.slot_start.strftime("%Y-%m-%d") if slot else None,
+            "time": slot.slot_start.strftime("%I:%M %p") if slot else None,
+            "status": a.status
+        })
+
+    return jsonify(out), 200
+
+# -------------------------
+# Accept appointment (doctor)
+# -------------------------
 @api.route("/appointments/<int:appointment_id>/accept", methods=["POST"])
 @auth_required(roles=["doctor"])
-def accept_appointment(appointment_id):
+def appointment_accept_route(appointment_id):
     appt = Appointment.query.get(appointment_id)
     if not appt or appt.doctor_id != request.current_user.user_id:
         return jsonify({"message": "Appointment not found or forbidden"}), 404
@@ -762,29 +809,39 @@ def accept_appointment(appointment_id):
     db.session.commit()
     return jsonify({"message": "Appointment confirmed"}), 200
 
+# -------------------------
+# Cancel appointment (doctor or patient)
+# -------------------------
 @api.route("/appointments/<int:appointment_id>/cancel", methods=["POST"])
 @auth_required(roles=["doctor","patient"])
-def cancel_appointment(appointment_id):
+def appointment_cancel_route(appointment_id):
     appt = Appointment.query.get(appointment_id)
     if not appt:
         return jsonify({"message": "Appointment not found"}), 404
+
+    # authorization
     if request.current_user.role == "doctor" and appt.doctor_id != request.current_user.user_id:
         return jsonify({"message": "Forbidden"}), 403
     if request.current_user.role == "patient" and appt.patient_id != request.current_user.user_id:
         return jsonify({"message": "Forbidden"}), 403
+
     appt.status = "cancelled"
     db.session.commit()
+
     # free the slot
     slot = DoctorSlot.query.get(appt.slot_id)
     if slot:
         slot.is_booked = False
         db.session.commit()
+
     return jsonify({"message": "Appointment cancelled"}), 200
 
+# -------------------------
+# Serve uploaded files (protected)
+# -------------------------
 @api.route("/uploads/<path:filename>", methods=["GET"])
 @auth_required()
 def serve_upload(filename):
-    # careful: still protected by auth_required
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename, as_attachment=True)
 
 # register blueprint under /api
@@ -804,7 +861,7 @@ def seed():
     user = User(name="Dr Joy", email="dr.joy@example.com", phone="9999999999", password_hash=pw, role="doctor", city="Mumbai")
     db.session.add(user)
     db.session.commit()
-    doc = Doctor(doctor_id=user.user_id, specialization="General", years_experience=8, rating=4.5, clinic_address="Mumbai Clinic", languages=["English"])
+    doc = Doctor(doctor_id=user.user_id, specialization="General", years_experience=8, rating=4.5, clinic_address="Mumbai Clinic", languages=["English"], consultation_fee=300)
     db.session.add(doc)
     # add a slot
     start = datetime.datetime.utcnow() + datetime.timedelta(days=1, hours=9)
