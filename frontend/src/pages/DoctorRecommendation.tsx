@@ -9,7 +9,7 @@ import Footer from '@/components/Footer';
 import LoadingSpinner from '@/components/LoadingSpinner';
 
 interface Doctor {
-  id: string;
+  id: number;                 // changed from string → number
   name: string;
   specialization: string;
   rating: number;
@@ -28,7 +28,19 @@ const DoctorRecommendation = () => {
     const fetchDoctors = async () => {
       try {
         const response = await api.get(`/recommend?condition=${condition}`);
-        setDoctors(response.data);
+
+        // 🔥 FIX: backend returns user_id → frontend expects id
+        const mapped = response.data.map((doc: any) => ({
+          id: doc.user_id,
+          name: doc.name,
+          specialization: doc.specialization,
+          rating: doc.rating,
+          experience: doc.experience,
+          clinicAddress: doc.clinicAddress,
+          city: doc.city,
+        }));
+
+        setDoctors(mapped);
       } catch (error) {
         console.error('Failed to fetch doctors', error);
       } finally {
@@ -64,6 +76,7 @@ const DoctorRecommendation = () => {
                   <CardTitle className="text-xl">{doctor.name}</CardTitle>
                   <p className="text-sm text-muted-foreground">{doctor.specialization}</p>
                 </CardHeader>
+
                 <CardContent className="space-y-3">
                   <div className="flex items-center gap-2 text-sm">
                     <Star className="h-4 w-4 fill-warning text-warning" />

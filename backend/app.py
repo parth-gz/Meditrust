@@ -119,6 +119,7 @@ class Summary(db.Model):
     upload_id = db.Column(db.Integer, db.ForeignKey("uploads.upload_id"), nullable=False, unique=True)
     summary_text = db.Column(db.Text, nullable=False)  # JSON string
     llm_model_used = db.Column(db.String(100))
+    recommended_specialist = db.Column(db.String(100))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
 class DoctorRecommendation(db.Model):
@@ -279,10 +280,17 @@ You are a clinical assistant. Given the OCR text below from a prescription or re
 - condition: short string or empty
 - medicines: list of objects {{ name, dosage, frequency, instructions (optional) }}
 - explanation: patient-friendly short instructions
-Return only JSON.
+- recommended_specialist: the medical specialist type needed based on the condition. 
+Examples:
+    - fungal infection → Dermatologist
+    - fever → General Physician
+    - chest pain → Cardiologist
+    - ear pain → ENT Specialist
+Return strictly JSON only.
 OCR_TEXT:
 \"\"\"{ocr_text}\"\"\"
 """
+
     analyze_contents = [
         {
             "role": "user",
@@ -403,6 +411,7 @@ def upload_file():
 
                 summary.summary_text = json.dumps(analysis_json)
                 summary.llm_model_used = GEMINI_MODEL if GEMINI_API_KEY else "gemini"
+                summary.recommended_specialist = analysis_json.get("recommended_specialist")
                 db.session.commit()
             except Exception:
                 app.logger.exception("Gemini pipeline failed. Upload saved with placeholder summary.")
@@ -568,21 +577,70 @@ def get_my_uploads():
 
     return jsonify(out), 200
 
-
-
 @api.route("/recommend", methods=["GET"])
 @auth_required(roles=["patient"])
 def recommend_doctors():
-    condition = request.args.get("condition", "")
+    # -----------------------------
+    # 1. Fetch patient's city
+    # -----------------------------
     user_city = request.current_user.city or request.args.get("city") or ""
-    # Lookup doctors who match city and specialization (simple contains)
-    q = db.session.query(User, Doctor).join(Doctor, Doctor.doctor_id==User.user_id).filter(User.city.ilike(f"%{user_city}%"))
+
+    # -----------------------------
+    # 2. Try to fetch the latest summary → get recommended_specialist
+    # -----------------------------
+    latest_summary = Summary.query \
+        .join(Upload, Upload.upload_id == Summary.upload_id) \
+        .filter(Upload.user_id == request.current_user.user_id) \
+        .order_by(Summary.created_at.desc()) \
+        .first()
+
+    recommended_specialist = None
+
+    if latest_summary:
+        try:
+            summary_json = json.loads(latest_summary.summary_text)
+            recommended_specialist = summary_json.get("recommended_specialist")
+        except Exception:
+            pass
+
+    # -----------------------------
+    # 3. Fallback if JSON didn't contain it
+    # -----------------------------
+    # Allow frontend to override manually
+    if not recommended_specialist:
+        recommended_specialist = request.args.get("specialist")
+
+    # If still nothing, fallback to simple query param "condition"
+    condition = request.args.get("condition")
+    if not recommended_specialist and condition:
+        # Use condition to match specializations
+        recommended_specialist = condition
+
+    # -----------------------------
+    # 4. Build doctor query
+    # -----------------------------
+    q = (
+        db.session.query(User, Doctor)
+        .join(Doctor, Doctor.doctor_id == User.user_id)
+        .filter(User.city.ilike(f"%{user_city}%"))
+    )
+
+    # If we have a specialist → filter by specialization
+    if recommended_specialist:
+        q = q.filter(
+            Doctor.specialization.ilike(f"%{recommended_specialist}%")
+        )
+
+    # Sort doctors by rating (high → low)
+    q = q.order_by(Doctor.rating.desc())
+
+    # -----------------------------
+    # 5. Format response
+    # -----------------------------
     results = []
     for user, doc in q.all():
-        if condition and condition.lower() not in (doc.specialization or "").lower():
-            continue
         results.append({
-            "user_id": user.user_id,
+            "doctor_id": user.user_id,
             "name": user.name,
             "email": user.email,
             "phone": user.phone,
@@ -593,6 +651,19 @@ def recommend_doctors():
             "clinicAddress": doc.clinic_address,
             "consultationFee": float(doc.consultation_fee or 0)
         })
+
+    # -----------------------------
+    # 6. Log recommendation
+    # -----------------------------
+    log = DoctorRecommendation(
+        user_id=request.current_user.user_id,
+        user_condition=recommended_specialist or condition,
+        city=user_city,
+        recommended_doctors=results
+    )
+    db.session.add(log)
+    db.session.commit()
+
     return jsonify(results), 200
 
 @api.route("/doctor/<int:doctor_id>", methods=["GET"])
@@ -622,6 +693,24 @@ def get_doctor_profile(doctor_id):
         "slots": slots_out
     }
     return jsonify(doc_info), 200
+
+@api.route("/doctor/<int:doctor_id>/slots", methods=["GET"])
+@auth_required(roles=["patient", "doctor"])
+def get_doctor_slots(doctor_id):
+    slots = DoctorSlot.query.filter_by(doctor_id=doctor_id).all()
+
+    output = []
+    for s in slots:
+        output.append({
+            "id": s.slot_id,
+            "date": s.slot_start.date().isoformat(),
+            "startTime": s.slot_start.strftime("%I:%M %p"),
+            "duration": int((s.slot_end - s.slot_start).total_seconds() // 60),
+            "available": not s.is_booked
+        })
+
+    return jsonify(output), 200
+
 
 @api.route("/doctor/add-slot", methods=["POST"])
 @auth_required(roles=["doctor"])
