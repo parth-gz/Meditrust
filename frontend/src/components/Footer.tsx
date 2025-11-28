@@ -8,7 +8,7 @@ const Footer = () => {
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Activity className="h-5 w-5 text-primary" />
             <span className="font-semibold text-foreground">Meditrust+</span>
-            <span>© 2024 All rights reserved</span>
+            <span>© 2025 All rights reserved</span>
           </div>
           
           <div className="flex gap-6 text-sm text-muted-foreground">

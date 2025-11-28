@@ -844,6 +844,46 @@ def appointment_cancel_route(appointment_id):
 def serve_upload(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename, as_attachment=True)
 
+@api.route("/appointments/my", methods=["GET"])
+@auth_required(roles=["patient"])
+def my_appointments_route():
+    user_id = request.current_user.user_id
+
+    appts = (
+        Appointment.query
+        .filter_by(patient_id=user_id)
+        .order_by(Appointment.created_at.desc())
+        .all()
+    )
+
+    out = []
+    for a in appts:
+        slot = DoctorSlot.query.get(a.slot_id)
+        doctor_user = User.query.get(a.doctor_id)
+        doctor_info = Doctor.query.get(a.doctor_id)
+
+        out.append({
+            "appointment_id": a.appointment_id,
+            "patient_id": a.patient_id,
+            "doctor_id": a.doctor_id,
+
+            # doctor details
+            "doctor_name": doctor_user.name if doctor_user else None,
+            "doctor_specialization": doctor_info.specialization if doctor_info else None,
+            "doctor_experience": doctor_info.years_experience if doctor_info else None,
+            "doctor_clinic": doctor_info.clinic_address if doctor_info else None,
+            "doctor_fee": float(doctor_info.consultation_fee or 0) if doctor_info else None,
+
+            # slot time
+            "slot_start": slot.slot_start.isoformat() if slot else None,
+
+            # appointment status
+            "status": a.status
+        })
+
+    return jsonify(out), 200
+
+
 # register blueprint under /api
 app.register_blueprint(api, url_prefix="/api")
 
