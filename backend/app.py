@@ -44,7 +44,17 @@ if GEMINI_AVAILABLE and GEMINI_API_KEY:
 
 # ---------- APP & DB ----------
 app = Flask(__name__, static_folder=None)
-CORS(app, supports_credentials=True)
+CORS(app,
+     resources={r"/*": {
+         "origins": [
+             "http://10.213.240.44:8080",   # other devices
+             "http://localhost:8080",       # your own PC local dev
+             "http://127.0.0.1:8080"        # alternate localhost
+         ]
+     }},
+     supports_credentials=True)
+
+
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
