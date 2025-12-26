@@ -1,31 +1,34 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle
+} from '@/components/ui/card';
 import { Activity } from 'lucide-react';
 import { toast } from 'sonner';
 
 const Login = () => {
   const navigate = useNavigate();
-  const { login, user } = useAuth();
+  const { login } = useAuth();
+
   const [isLoading, setIsLoading] = useState(false);
   const [formData, setFormData] = useState({
     email: '',
-    password: '',
+    password: ''
   });
 
-  useEffect(() => {
-    // Redirect if already logged in
-    if (user) {
-      navigate(user.role === 'doctor' ? '/doctor/dashboard' : '/dashboard');
-    }
-  }, [user, navigate]);
-
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData({ ...formData, [e.target.name]: e.target.value });
+    setFormData({
+      ...formData,
+      [e.target.name]: e.target.value
+    });
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -33,11 +36,27 @@ const Login = () => {
     setIsLoading(true);
 
     try {
-      await login(formData.email, formData.password);
+      // 👇 IMPORTANT: login() must return backend response
+      const res = await login(formData.email, formData.password);
+
       toast.success('Login successful!');
-      // Navigation handled by useEffect
+
+      const { user, needs_medical_profile } = res.data;
+
+      // ---- ROUTING DECISION (OPTION 1) ----
+      if (user.role === 'doctor') {
+        navigate('/doctor/dashboard');
+        return;
+      }
+
+      if (needs_medical_profile) {
+        navigate('/medical-profile');
+      } else {
+        navigate('/choose-action');
+      }
+
     } catch (error: any) {
-      toast.error(error.message || 'Login failed');
+      toast.error(error?.message || 'Login failed');
     } finally {
       setIsLoading(false);
     }
@@ -83,7 +102,10 @@ const Login = () => {
             </div>
 
             <div className="flex items-center justify-end">
-              <Link to="/forgot-password" className="text-sm text-primary hover:underline">
+              <Link
+                to="/forgot-password"
+                className="text-sm text-primary hover:underline"
+              >
                 Forgot Password?
               </Link>
             </div>
@@ -93,7 +115,7 @@ const Login = () => {
             </Button>
 
             <p className="text-center text-sm text-muted-foreground">
-              Don't have an account?{' '}
+              Don&apos;t have an account?{' '}
               <Link to="/signup" className="text-primary hover:underline">
                 Sign up
               </Link>

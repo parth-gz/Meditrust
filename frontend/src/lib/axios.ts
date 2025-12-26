@@ -5,7 +5,8 @@ import axios, {
 } from "axios";
 
 const api = axios.create({
-  baseURL: "http://10.213.240.44:5000/api",
+  baseURL: "http://localhost:5000/api",
+  withCredentials: false,
 });
 
 // ----------------------
@@ -15,23 +16,24 @@ api.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     const token = localStorage.getItem("token");
 
-    // Ensure headers ALWAYS exist and are correctly typed
+    // Ensure headers object exists
     if (!config.headers) {
       config.headers = new AxiosHeaders();
     } else if (!(config.headers instanceof AxiosHeaders)) {
       config.headers = new AxiosHeaders(config.headers);
     }
 
-    // Attach JWT safely
+    // Attach JWT correctly
     if (token) {
       config.headers.set("Authorization", `Bearer ${token}`);
     }
 
-    const isFormData = config.data instanceof FormData;
-
-    if (!isFormData) {
-      config.headers.set("Content-Type", "application/json");
+    // Only set JSON headers if NOT FormData
+    if (!(config.data instanceof FormData)) {
       config.headers.set("Accept", "application/json");
+      if (config.method !== "get") {
+        config.headers.set("Content-Type", "application/json");
+      }
     }
 
     return config;
@@ -43,13 +45,18 @@ api.interceptors.request.use(
 // RESPONSE INTERCEPTOR
 // ----------------------
 api.interceptors.response.use(
-  (res) => res,
+  (response) => response,
   (error: AxiosError) => {
     if (error.response?.status === 401) {
+      /**
+       * IMPORTANT:
+       * Do NOT hard redirect here.
+       * Just clear auth and let React routing handle it.
+       */
       localStorage.removeItem("token");
       localStorage.removeItem("user");
-      window.location.href = "/login";
     }
+
     return Promise.reject(error);
   }
 );

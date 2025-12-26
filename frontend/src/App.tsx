@@ -7,7 +7,10 @@ import { AuthProvider } from "./contexts/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Index from "./pages/Index";
 import Signup from "./pages/Signup";
+import MedicalProfile from "./pages/MedicalProfile";
 import Login from "./pages/Login";
+import ChooseAction from './pages/ChooseAction';
+import Symptoms from './pages/Symptoms';
 import Dashboard from "./pages/Dashboard";
 import PrescriptionSummary from "./pages/PrescriptionSummary";
 import DoctorRecommendation from "./pages/DoctorRecommendation";
@@ -30,8 +33,20 @@ const App = () => (
             <Route path="/" element={<Index />} />
             <Route path="/signup" element={<Signup />} />
             <Route path="/login" element={<Login />} />
+            <Route path="/choose-action" element={<ChooseAction />} />
+            <Route path="/symptoms" element={<ProtectedRoute><Symptoms /></ProtectedRoute>}/>
+            <Route path="/doctor-recommendations" element={<ProtectedRoute><DoctorRecommendation /></ProtectedRoute>}/>
+
             
             {/* Patient Routes */}
+            <Route
+              path="/medical-profile"
+              element={
+                <ProtectedRoute>
+                  <MedicalProfile />
+                </ProtectedRoute>
+              }
+            />
             <Route
               path="/dashboard"
               element={
