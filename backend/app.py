@@ -12,6 +12,7 @@ from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
+from sqlalchemy import text
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -233,6 +234,19 @@ def auth_required(roles=None):
         return decorated
     return decorator
 
+def user_has_medical_profile(user_id: int) -> bool:
+    allergy_count = db.session.execute(
+        text("SELECT COUNT(*) FROM user_allergies WHERE user_id = :uid"),
+        {"uid": user_id}
+    ).scalar()
+
+    condition_count = db.session.execute(
+        text("SELECT COUNT(*) FROM user_conditions WHERE user_id = :uid"),
+        {"uid": user_id}
+    ).scalar()
+
+    return (allergy_count or 0) > 0 or (condition_count or 0) > 0
+
 # ---------- OCR / Gemini helpers (optional, run only if GEMINI_API_KEY present) ----------
 def clean_json_text(text: str) -> dict:
     """
@@ -372,7 +386,277 @@ def login():
     if not user or not check_password_hash(user.password_hash, data["password"]):
         return jsonify({"message": "Invalid credentials"}), 401
     token = create_token(user)
-    return jsonify({"token": token, "user": user.to_dict()}), 200
+    return jsonify({
+    "access_token": token,
+    "user": user.to_dict(),
+    "needs_medical_profile": not user_has_medical_profile(user.user_id)
+    }), 200
+
+@api.route("/allergies", methods=["GET"])
+def get_all_allergies():
+    rows = db.session.execute(
+        text("SELECT allergy_id, name FROM allergies ORDER BY name")
+    ).mappings().all()
+
+    allergies = [dict(row) for row in rows]
+
+    return jsonify(allergies), 200
+
+
+
+@api.route("/me/allergies", methods=["GET"])
+@auth_required(roles=["patient"])
+def get_my_allergies():
+    rows = db.session.execute(
+        text("""
+            SELECT a.allergy_id, a.name
+            FROM user_allergies ua
+            JOIN allergies a ON a.allergy_id = ua.allergy_id
+            WHERE ua.user_id = :uid
+        """),
+        {"uid": request.current_user.user_id}
+    ).mappings().all()
+    return jsonify(rows), 200
+
+
+@api.route("/me/allergies", methods=["POST"])
+@auth_required(roles=["patient"])
+def set_my_allergies():
+    data = request.json or {}
+    allergy_ids = data.get("allergy_ids", [])
+    uid = request.current_user.user_id
+
+    db.session.execute(
+        text("DELETE FROM user_allergies WHERE user_id = :uid"),
+        {"uid": uid}
+    )
+
+    for aid in allergy_ids:
+        db.session.execute(
+            text("""
+                INSERT INTO user_allergies (user_id, allergy_id)
+                VALUES (:uid, :aid)
+            """),
+            {"uid": uid, "aid": aid}
+        )
+
+    db.session.commit()
+    return jsonify({"message": "Allergies updated"}), 200
+
+
+@api.route("/me/conditions", methods=["GET"])
+@auth_required(roles=["patient"])
+def get_my_conditions():
+    rows = db.session.execute(
+        text("""
+            SELECT conditn
+            FROM user_conditions
+            WHERE user_id = :uid
+        """),
+        {"uid": request.current_user.user_id}
+    ).scalars().all()
+    return jsonify(rows), 200
+
+
+@api.route("/me/conditions", methods=["POST"])
+@auth_required(roles=["patient"])
+def set_my_conditions():
+    data = request.json or {}
+    conditions = data.get("conditions", [])
+    uid = request.current_user.user_id
+
+    db.session.execute(
+        text("DELETE FROM user_conditions WHERE user_id = :uid"),
+        {"uid": uid}
+    )
+
+    for c in conditions:
+        c = c.strip()
+        if c:
+            db.session.execute(
+                text("""
+                    INSERT INTO user_conditions (user_id, conditn)
+                    VALUES (:uid, :cond)
+                """),
+                {"uid": uid, "cond": c}
+            )
+
+    db.session.commit()
+    return jsonify({"message": "Conditions updated"}), 200
+
+# -------------------------
+# Save complete medical profile (allergies + conditions)
+# -------------------------
+@api.route("/medical-profile", methods=["POST"])
+@auth_required(roles=["patient"])
+def save_medical_profile():
+    data = request.json or {}
+    allergy_ids = data.get("allergies", [])
+    conditions = data.get("conditions", [])
+
+    uid = request.current_user.user_id
+
+    # ---- Allergies ----
+    db.session.execute(
+        text("DELETE FROM user_allergies WHERE user_id = :uid"),
+        {"uid": uid}
+    )
+
+    for aid in allergy_ids:
+        db.session.execute(
+            text("""
+                INSERT INTO user_allergies (user_id, allergy_id)
+                VALUES (:uid, :aid)
+            """),
+            {"uid": uid, "aid": aid}
+        )
+
+    # ---- Conditions ----
+    db.session.execute(
+        text("DELETE FROM user_conditions WHERE user_id = :uid"),
+        {"uid": uid}
+    )
+
+    for c in conditions:
+        c = c.strip()
+        if c:
+            db.session.execute(
+                text("""
+                    INSERT INTO user_conditions (user_id, conditn)
+                    VALUES (:uid, :cond)
+                """),
+                {"uid": uid, "cond": c}
+            )
+
+    db.session.commit()
+
+    return jsonify({
+        "message": "Medical profile saved successfully",
+        "needs_medical_profile": False
+    }), 200
+
+# -------------------------
+# Analyze symptoms & recommend doctor (AI)
+# -------------------------
+@api.route("/symptoms/analyze", methods=["POST"])
+@auth_required(roles=["patient"])
+def analyze_symptoms():
+    data = request.json or {}
+    symptoms = data.get("symptoms", "").strip()
+    severity = data.get("severity", "mild")
+
+    if not symptoms:
+        return jsonify({"message": "Symptoms are required"}), 400
+
+    # If Gemini is not configured, fail gracefully
+    if not GEMINI_AVAILABLE or not GEMINI_API_KEY:
+        return jsonify({
+            "condition": "Unknown",
+            "explanation": "AI analysis is currently unavailable. Please consult a doctor directly.",
+            "recommended_specialist": "General Physician"
+        }), 200
+
+    try:
+        model = genai.GenerativeModel(GEMINI_MODEL)
+
+        prompt = f"""
+You are a medical assistant AI.
+
+A patient has reported the following symptoms:
+Symptoms: {symptoms}
+Severity: {severity}
+
+Your task:
+1. Suggest a POSSIBLE medical condition (not a confirmed diagnosis).
+2. Provide a short, patient-friendly explanation.
+3. Recommend the most suitable medical specialist.
+
+Rules:
+- Do NOT provide a diagnosis.
+- Do NOT suggest medications.
+- Use cautious language ("may indicate", "could be related to").
+- Keep the explanation under 4 sentences.
+- Return STRICT JSON with keys:
+  condition, explanation, recommended_specialist
+
+Example:
+{{
+  "condition": "Possible viral fever",
+  "explanation": "These symptoms may indicate a viral infection...",
+  "recommended_specialist": "General Physician"
+}}
+"""
+
+        response = model.generate_content(prompt)
+
+        # Extract and clean JSON
+        analysis_text = response.text if hasattr(response, "text") else str(response)
+        analysis_json = clean_json_text(analysis_text)
+
+        # Safety fallback
+        return jsonify({
+            "condition": analysis_json.get("condition", "Unknown"),
+            "explanation": analysis_json.get(
+                "explanation",
+                "Based on the symptoms provided, a doctor consultation is recommended."
+            ),
+            "recommended_specialist": analysis_json.get(
+                "recommended_specialist",
+                "General Physician"
+            )
+        }), 200
+
+    except Exception as e:
+        app.logger.exception("Symptom analysis failed")
+        return jsonify({
+            "condition": "Unknown",
+            "explanation": "We encountered an issue while analyzing your symptoms. Please consult a doctor.",
+            "recommended_specialist": "General Physician"
+        }), 200
+
+# -------------------------
+# Recommend doctors from symptom analysis
+# -------------------------
+@api.route("/recommend/from-symptoms", methods=["POST"])
+@auth_required(roles=["patient"])
+def recommend_from_symptoms():
+    data = request.json or {}
+
+    condition = data.get("condition")
+    recommended_specialist = data.get("recommended_specialist")
+
+    if not recommended_specialist:
+        return jsonify({"message": "Specialist not provided"}), 400
+
+    # reuse existing recommend logic
+    user_city = request.current_user.city or ""
+
+    q = (
+        db.session.query(User, Doctor)
+        .join(Doctor, Doctor.doctor_id == User.user_id)
+        .filter(User.city.ilike(f"%{user_city}%"))
+        .filter(Doctor.specialization.ilike(f"%{recommended_specialist}%"))
+        .order_by(Doctor.rating.desc())
+    )
+
+    doctors = []
+    for user, doc in q.all():
+        doctors.append({
+            "doctor_id": user.user_id,
+            "name": user.name,
+            "specialization": doc.specialization,
+            "rating": float(doc.rating or 0),
+            "experience": int(doc.years_experience or 0),
+            "clinic_address": doc.clinic_address,
+            "consultation_fee": float(doc.consultation_fee or 0)
+        })
+
+    return jsonify({
+        "condition": condition,
+        "recommended_specialist": recommended_specialist,
+        "doctors": doctors
+    }), 200
+
 
 @api.route("/upload", methods=["POST"])
 @auth_required(roles=["patient","doctor"])
@@ -966,29 +1250,6 @@ def doctor_delete_slot_route(slot_id):
 # register blueprint under /api
 app.register_blueprint(api, url_prefix="/api")
 
-# CLI helpers
-@app.cli.command("seed")
-def seed():
-    """Seed a sample doctor user (if not exists)"""
-    # safe create_all for dev seed; comment out in production
-    db.create_all()
-    existing = User.query.filter_by(email="dr.joy@example.com").first()
-    if existing:
-        print("Seed already present")
-        return
-    pw = generate_password_hash("password")
-    user = User(name="Dr Joy", email="dr.joy@example.com", phone="9999999999", password_hash=pw, role="doctor", city="Mumbai")
-    db.session.add(user)
-    db.session.commit()
-    doc = Doctor(doctor_id=user.user_id, specialization="General", years_experience=8, rating=4.5, clinic_address="Mumbai Clinic", languages=["English"], consultation_fee=300)
-    db.session.add(doc)
-    # add a slot
-    start = datetime.datetime.utcnow() + datetime.timedelta(days=1, hours=9)
-    end = start + datetime.timedelta(minutes=30)
-    slot = DoctorSlot(doctor_id=user.user_id, slot_start=start, slot_end=end, is_booked=False)
-    db.session.add(slot)
-    db.session.commit()
-    print("Seeded doctor and slot")
 
 if __name__ == "__main__":
     # DO NOT call db.create_all() automatically against an existing production DB.
