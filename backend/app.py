@@ -44,15 +44,20 @@ if GEMINI_AVAILABLE and GEMINI_API_KEY:
 
 # ---------- APP & DB ----------
 app = Flask(__name__, static_folder=None)
-CORS(app,
-     resources={r"/*": {
-         "origins": [
-             "http://10.213.240.44:8080",   # other devices
-             "http://localhost:8080",       # your own PC local dev
-             "http://127.0.0.1:8080"        # alternate localhost
-         ]
-     }},
-     supports_credentials=True)
+CORS(
+    app,
+    origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://10.213.240.44:8080",
+    ],
+    supports_credentials=True,
+    allow_headers="*",
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+)
+
+
+
 
 
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
@@ -892,6 +897,70 @@ def my_appointments_route():
         })
 
     return jsonify(out), 200
+
+# -------------------------
+# Update slot (doctor) - Option A: PUT /doctor/slot/<slot_id>
+# -------------------------
+@api.route("/doctor/slot/<int:slot_id>", methods=["PUT"])
+@auth_required(roles=["doctor"])
+def doctor_update_slot_route(slot_id):
+    data = request.json or {}
+    # Only doctor owning the slot can edit
+    slot = DoctorSlot.query.get(slot_id)
+    if not slot:
+        return jsonify({"message": "Slot not found"}), 404
+    if slot.doctor_id != request.current_user.user_id:
+        return jsonify({"message": "Forbidden"}), 403
+
+    # Accept payload fields: date (YYYY-MM-DD) or slot_start iso, startTime (HH:MM), duration (minutes)
+    try:
+        if data.get("slot_start"):
+            new_start = datetime.datetime.fromisoformat(data["slot_start"])
+            duration = int(data.get("duration", int((slot.slot_end - slot.slot_start).total_seconds() / 60)))
+            new_end = new_start + datetime.timedelta(minutes=duration)
+        elif data.get("date") and data.get("startTime"):
+            new_start = datetime.datetime.fromisoformat(f"{data['date']}T{data['startTime']}")
+            duration = int(data.get("duration", int((slot.slot_end - slot.slot_start).total_seconds() / 60)))
+            new_end = new_start + datetime.timedelta(minutes=duration)
+        else:
+            return jsonify({"message": "Provide slot_start ISO or date + startTime"}), 400
+    except Exception as e:
+        return jsonify({"message": "Invalid datetime format", "error": str(e)}), 400
+
+    # If slot is already booked, disallow changing start time (or optionally allow — here we disallow)
+    if slot.is_booked:
+        return jsonify({"message": "Cannot edit a booked slot"}), 400
+
+    slot.slot_start = new_start
+    slot.slot_end = new_end
+    db.session.commit()
+
+    return jsonify({
+        "message": "Slot updated",
+        "slot_id": slot.slot_id,
+        "slot_start": slot.slot_start.isoformat(),
+        "slot_end": slot.slot_end.isoformat()
+    }), 200
+
+# -------------------------
+# Delete slot (doctor)
+# -------------------------
+@api.route("/doctor/slot/<int:slot_id>", methods=["DELETE"])
+@auth_required(roles=["doctor"])
+def doctor_delete_slot_route(slot_id):
+    slot = DoctorSlot.query.get(slot_id)
+    if not slot:
+        return jsonify({"message": "Slot not found"}), 404
+    if slot.doctor_id != request.current_user.user_id:
+        return jsonify({"message": "Forbidden"}), 403
+
+    # If slot is booked, disallow deletion (alternatively cancel appointment first). We will disallow to be safe.
+    if slot.is_booked:
+        return jsonify({"message": "Cannot delete a booked slot"}), 400
+
+    db.session.delete(slot)
+    db.session.commit()
+    return jsonify({"message": "Slot deleted", "slot_id": slot_id}), 200
 
 
 # register blueprint under /api
