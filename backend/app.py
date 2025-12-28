@@ -5,6 +5,7 @@ import json
 import base64
 import traceback
 from functools import wraps
+from datetime import date
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -263,6 +264,78 @@ def clean_json_text(text: str) -> dict:
     except Exception:
         return {"raw": text}
 
+# helper function to fetch patient medical context (allergies and conditions)
+
+
+def calculate_age(dob):
+    if not dob:
+        return None
+    today = date.today()
+    return today.year - dob.year - (
+        (today.month, today.day) < (dob.month, dob.day)
+    )
+
+
+def get_user_medical_context(user_id: int):
+    # -----------------------
+    # Allergies
+    # -----------------------
+    allergies = db.session.execute(
+        text("""
+            SELECT a.name
+            FROM user_allergies ua
+            JOIN allergies a ON a.allergy_id = ua.allergy_id
+            WHERE ua.user_id = :uid
+        """),
+        {"uid": user_id}
+    ).scalars().all()
+
+    # -----------------------
+    # Conditions
+    # -----------------------
+    conditions = db.session.execute(
+        text("""
+            SELECT conditn
+            FROM user_conditions
+            WHERE user_id = :uid
+        """),
+        {"uid": user_id}
+    ).scalars().all()
+
+    # -----------------------
+    # Medical profile
+    # -----------------------
+    profile = db.session.execute(
+        text("""
+            SELECT
+                date_of_birth,
+                gender,
+                blood_group,
+                height_cm,
+                weight_kg,
+                is_smoker,
+                alcohol_use
+            FROM user_medical_profile
+            WHERE user_id = :uid
+        """),
+        {"uid": user_id}
+    ).mappings().first()
+
+    age = calculate_age(profile["date_of_birth"]) if profile else None
+
+    return {
+        "age": age,
+        "gender": profile["gender"] if profile else None,
+        "blood_group": profile["blood_group"] if profile else None,
+        "height_cm": profile["height_cm"] if profile else None,
+        "weight_kg": profile["weight_kg"] if profile else None,
+        "is_smoker": profile["is_smoker"] if profile else False,
+        "alcohol_use": profile["alcohol_use"] if profile else False,
+        "allergies": allergies,
+        "conditions": conditions
+    }
+
+
 def run_gemini_pipeline(image_path: str) -> (str, dict):
     """
     Returns (ocr_text, analysis_json).
@@ -384,7 +457,7 @@ def login():
     return jsonify({
     "access_token": token,
     "user": user.to_dict(),
-    "needs_medical_profile": not user_has_medical_profile(user.user_id)
+    "needs_medical_profile": not is_medical_profile_complete(user.user_id)
     }), 200
 
 @api.route("/allergies", methods=["GET"])
@@ -418,22 +491,60 @@ def get_my_allergies():
 @auth_required(roles=["patient"])
 def set_my_allergies():
     data = request.json or {}
-    allergy_ids = data.get("allergy_ids", [])
+    allergies = data.get("allergies", [])
     uid = request.current_user.user_id
 
+    # Clear existing
     db.session.execute(
         text("DELETE FROM user_allergies WHERE user_id = :uid"),
         {"uid": uid}
     )
 
-    for aid in allergy_ids:
-        db.session.execute(
-            text("""
-                INSERT INTO user_allergies (user_id, allergy_id)
-                VALUES (:uid, :aid)
-            """),
-            {"uid": uid, "aid": aid}
-        )
+    for allergy in allergies:
+        allergy_id = allergy.get("id")
+        allergy_name = allergy.get("name", "").strip()
+
+        # Case 1: predefined allergy
+        if allergy_id:
+            db.session.execute(
+                text("""
+                    INSERT INTO user_allergies (user_id, allergy_id)
+                    VALUES (:uid, :aid)
+                """),
+                {"uid": uid, "aid": allergy_id}
+            )
+
+        # Case 2: custom allergy → insert into allergies first
+        elif allergy_name:
+            row = db.session.execute(
+                text("""
+                    SELECT allergy_id
+                    FROM allergies
+                    WHERE LOWER(name) = LOWER(:name)
+                """),
+                {"name": allergy_name}
+            ).first()
+
+            # Insert if not exists
+            if row:
+                new_allergy_id = row[0]
+            else:
+                result = db.session.execute(
+                    text("""
+                        INSERT INTO allergies (name)
+                        VALUES (:name)
+                    """),
+                    {"name": allergy_name}
+                )
+                new_allergy_id = result.lastrowid
+
+            db.session.execute(
+                text("""
+                    INSERT INTO user_allergies (user_id, allergy_id)
+                    VALUES (:uid, :aid)
+                """),
+                {"uid": uid, "aid": new_allergy_id}
+            )
 
     db.session.commit()
     return jsonify({"message": "Allergies updated"}), 200
@@ -486,33 +597,213 @@ def set_my_conditions():
 @auth_required(roles=["patient"])
 def save_medical_profile():
     data = request.json or {}
-    allergy_ids = data.get("allergies", [])
-    conditions = data.get("conditions", [])
+
+    allergy_names = data.get("allergies", [])   # list of strings
+    conditions = data.get("conditions", [])     # list of strings
 
     uid = request.current_user.user_id
 
-    # ---- Allergies ----
+    # --------------------
+    # RESET EXISTING DATA
+    # --------------------
     db.session.execute(
         text("DELETE FROM user_allergies WHERE user_id = :uid"),
         {"uid": uid}
     )
 
-    for aid in allergy_ids:
-        db.session.execute(
-            text("""
-                INSERT INTO user_allergies (user_id, allergy_id)
-                VALUES (:uid, :aid)
-            """),
-            {"uid": uid, "aid": aid}
-        )
-
-    # ---- Conditions ----
     db.session.execute(
         text("DELETE FROM user_conditions WHERE user_id = :uid"),
         {"uid": uid}
     )
 
-    for c in conditions:
+    # --------------------
+    # HANDLE ALLERGIES
+    # --------------------
+    for name in allergy_names:
+        name = name.strip()
+        if not name:
+            continue
+
+        # 1. Insert allergy if it does not exist
+        db.session.execute(
+            text("""
+                INSERT INTO allergies (name, category)
+                SELECT :name, 'other'
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM allergies WHERE LOWER(name) = LOWER(:name)
+                )
+            """),
+            {"name": name}
+        )
+
+        # 2. Always fetch allergy_id safely
+        allergy_id = db.session.execute(
+            text("""
+                SELECT allergy_id
+                FROM allergies
+                WHERE LOWER(name) = LOWER(:name)
+                LIMIT 1
+            """),
+            {"name": name}
+        ).scalar()
+
+        # 3. Map user → allergy
+        if allergy_id:
+            db.session.execute(
+                text("""
+                    INSERT INTO user_allergies (user_id, allergy_id)
+                    VALUES (:uid, :aid)
+                """),
+                {"uid": uid, "aid": allergy_id}
+            )
+
+    # --------------------
+    # HANDLE CONDITIONS
+    # --------------------
+    for cond in conditions:
+        cond = cond.strip()
+        if cond:
+            db.session.execute(
+                text("""
+                    INSERT INTO user_conditions (user_id, conditn)
+                    VALUES (:uid, :cond)
+                """),
+                {"uid": uid, "cond": cond}
+            )
+
+    db.session.commit()
+
+    return jsonify({
+        "message": "Medical profile saved successfully",
+        "needs_medical_profile": False
+    }), 200
+
+
+#medical profile routes. used to: prefill medical profile page and check completeness
+@api.route("/me/medical-profile", methods=["GET"])
+@auth_required(roles=["patient"])
+def get_medical_profile():
+    uid = request.current_user.user_id
+
+    row = db.session.execute(
+        text("""
+            SELECT 
+                date_of_birth,
+                gender,
+                blood_group,
+                height_cm,
+                weight_kg,
+                is_smoker,
+                alcohol_use
+            FROM user_medical_profile
+            WHERE user_id = :uid
+        """),
+        {"uid": uid}
+    ).mappings().first()
+
+    return jsonify(dict(row) if row else {}), 200
+
+@api.route("/me/medical-profile", methods=["POST"])
+@auth_required(roles=["patient"])
+def save_core_medical_profile():
+    data = request.json or {}
+    uid = request.current_user.user_id
+
+    # ---------------- CORE PROFILE ----------------
+    db.session.execute(
+        text("""
+            INSERT INTO user_medical_profile (
+                user_id,
+                date_of_birth,
+                gender,
+                blood_group,
+                height_cm,
+                weight_kg,
+                is_smoker,
+                alcohol_use
+            )
+            VALUES (
+                :uid,
+                :dob,
+                :gender,
+                :blood,
+                :height,
+                :weight,
+                :smoker,
+                :alcohol
+            )
+            ON DUPLICATE KEY UPDATE
+                date_of_birth = VALUES(date_of_birth),
+                gender = VALUES(gender),
+                blood_group = VALUES(blood_group),
+                height_cm = VALUES(height_cm),
+                weight_kg = VALUES(weight_kg),
+                is_smoker = VALUES(is_smoker),
+                alcohol_use = VALUES(alcohol_use)
+        """),
+        {
+            "uid": uid,
+            "dob": data.get("date_of_birth"),
+            "gender": data.get("gender"),
+            "blood": data.get("blood_group"),
+            "height": data.get("height_cm"),
+            "weight": data.get("weight_kg"),
+            "smoker": bool(data.get("is_smoker")),
+            "alcohol": bool(data.get("alcohol_use")),
+        }
+    )
+
+    # ---------------- RESET ALLERGIES ----------------
+    db.session.execute(
+        text("DELETE FROM user_allergies WHERE user_id = :uid"),
+        {"uid": uid}
+    )
+
+    # ---------------- ALLERGIES ----------------
+    for a in data.get("allergies", []):
+        name = a.get("name", "").strip()
+        allergy_id = a.get("id")
+
+        if not name:
+            continue
+
+        if not allergy_id:
+            # insert custom allergy if not exists
+            db.session.execute(
+                text("""
+                    INSERT INTO allergies (name, category)
+                    SELECT :name, 'other'
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM allergies WHERE LOWER(name) = LOWER(:name)
+                    )
+                """),
+                {"name": name}
+            )
+
+            allergy_id = db.session.execute(
+                text("""
+                    SELECT allergy_id FROM allergies
+                    WHERE LOWER(name) = LOWER(:name)
+                    LIMIT 1
+                """),
+                {"name": name}
+            ).scalar()
+
+        db.session.execute(
+            text("""
+                INSERT INTO user_allergies (user_id, allergy_id)
+                VALUES (:uid, :aid)
+            """),
+            {"uid": uid, "aid": allergy_id}
+        )
+
+    # ---------------- CONDITIONS ----------------
+    db.session.execute(
+        text("DELETE FROM user_conditions WHERE user_id = :uid"),
+        {"uid": uid}
+    )
+
+    for c in data.get("conditions", []):
         c = c.strip()
         if c:
             db.session.execute(
@@ -525,10 +816,73 @@ def save_medical_profile():
 
     db.session.commit()
 
-    return jsonify({
-        "message": "Medical profile saved successfully",
-        "needs_medical_profile": False
-    }), 200
+    return jsonify({"message": "Medical profile saved"}), 200
+
+@api.route("/me/medications", methods=["GET"])
+@auth_required(roles=["patient"])
+def get_my_medications():
+    uid = request.current_user.user_id
+
+    rows = db.session.execute(
+        text("""
+            SELECT medication_id, medication_name
+            FROM user_medications
+            WHERE user_id = :uid
+            ORDER BY medication_name
+        """),
+        {"uid": uid}
+    ).mappings().all()
+
+    return jsonify([dict(r) for r in rows]), 200
+
+@api.route("/me/medications", methods=["POST"])
+@auth_required(roles=["patient"])
+def set_my_medications():
+    data = request.json or {}
+    meds = data.get("medications", [])
+    uid = request.current_user.user_id
+
+    db.session.execute(
+        text("DELETE FROM user_medications WHERE user_id = :uid"),
+        {"uid": uid}
+    )
+
+    for med in meds:
+        med = med.strip()
+        if med:
+            db.session.execute(
+                text("""
+                    INSERT INTO user_medications (user_id, medication_name)
+                    VALUES (:uid, :name)
+                """),
+                {"uid": uid, "name": med}
+            )
+
+    db.session.commit()
+    return jsonify({"message": "Medications updated"}), 200
+
+def is_medical_profile_complete(user_id):
+    row = db.session.execute(
+        text("""
+            SELECT 
+                date_of_birth,
+                gender,
+                blood_group
+            FROM user_medical_profile
+            WHERE user_id = :uid
+        """),
+        {"uid": user_id}
+    ).mappings().first()
+
+    if not row:
+        return False
+
+    return all([
+        row["date_of_birth"],
+        row["gender"],
+        row["blood_group"]
+    ])
+
 
 # -------------------------
 # Analyze symptoms & recommend doctor (AI)
@@ -652,6 +1006,33 @@ def recommend_from_symptoms():
         "doctors": doctors
     }), 200
 
+# -------------------------
+# Doctor profile (PATIENT VIEW)
+# -------------------------
+@api.route("/doctor/<int:doctor_id>", methods=["GET"])
+@auth_required(roles=["patient", "doctor"])
+def get_doctor_profile(doctor_id):
+    doctor = Doctor.query.get(doctor_id)
+    if not doctor:
+        return jsonify({"message": "Doctor not found"}), 404
+
+    user = User.query.get(doctor_id)
+    if not user:
+        return jsonify({"message": "Doctor user not found"}), 404
+
+    return jsonify({
+        "doctor_id": doctor.doctor_id,
+        "name": user.name,
+        "specialization": doctor.specialization,
+        "rating": float(doctor.rating or 0),
+        "years_experience": int(doctor.years_experience or 0),
+        "languages": doctor.languages or [],
+        "clinic_address": doctor.clinic_address,
+        "city": user.city,
+        "consultation_fee": float(doctor.consultation_fee or 0),
+        "bio": doctor.bio
+    }), 200
+
 
 @api.route("/upload", methods=["POST"])
 @auth_required(roles=["patient","doctor"])
@@ -714,6 +1095,123 @@ def upload_file():
         app.logger.error("Upload failed: %s", str(e))
         traceback.print_exc()
         return jsonify({"message": "Server error", "error": str(e)}), 500
+
+@api.route("/prescription/<int:upload_id>/validate", methods=["POST"])
+@auth_required(roles=["patient"])
+def validate_prescription(upload_id):
+    # -----------------------
+    # Ownership & existence checks
+    # -----------------------
+    upload = Upload.query.get(upload_id)
+    if not upload or upload.user_id != request.current_user.user_id:
+        return jsonify({"message": "Prescription not found"}), 404
+
+    summary = Summary.query.filter_by(upload_id=upload_id).first()
+    if not summary:
+        return jsonify({"message": "Summary not found"}), 404
+
+    # -----------------------
+    # Parse stored summary
+    # -----------------------
+    try:
+        summary_json = json.loads(summary.summary_text)
+    except Exception:
+        return jsonify({"message": "Invalid summary data"}), 400
+
+    # Create readable summary text for LLM
+    summary_text = json.dumps(summary_json, indent=2)
+
+    # -----------------------
+    # Patient medical context
+    # -----------------------
+    patient_context = get_user_medical_context(request.current_user.user_id)
+
+    # -----------------------
+    # Gemini availability check
+    # -----------------------
+    if not GEMINI_AVAILABLE or not GEMINI_API_KEY:
+        return jsonify({
+            "validated": False,
+            "warning": "AI validation unavailable",
+            "summary": summary_json
+        }), 200
+
+    model = genai.GenerativeModel(GEMINI_MODEL)
+
+    # -----------------------
+    # Build patient context
+    # -----------------------
+    patient_context_text = f"""
+Patient Medical Context:
+- Age: {patient_context.get('age')}
+- Gender: {patient_context.get('gender')}
+- Blood Group: {patient_context.get('blood_group')}
+- Height: {patient_context.get('height_cm')} cm
+- Weight: {patient_context.get('weight_kg')} kg
+- Smoker: {"Yes" if patient_context.get('is_smoker') else "No"}
+- Alcohol Use: {"Yes" if patient_context.get('alcohol_use') else "No"}
+- Known Allergies: {", ".join(patient_context.get('allergies') or ["None"])}
+- Existing Conditions: {", ".join(patient_context.get('conditions') or ["None"])}
+"""
+
+    # -----------------------
+    # Gemini prompt
+    # -----------------------
+    prompt = f"""
+You are a medical prescription safety assistant.
+IMPORTANT INSTRUCTIONS:
+- Write the response directly for the user (use "you", not "the patient").
+- Do NOT use clinical or third-person language.
+- Be calm, reassuring, and easy to understand.
+- Do NOT be alarmist.
+- If there is uncertainty, explain it gently.
+- Always include a short reminder that you may be wrong and a doctor should be consulted.
+- Keep the response concise (max 3-4 short sentences total). Avoid repetition and excessive explanations.
+
+User medical context: 
+{patient_context_text}
+
+Prescription Details (extracted from doctor's prescription):
+{summary_text}
+
+Your task:
+1. Check if any prescribed medicines conflict with known allergies.
+2. Check contraindications with existing medical conditions.
+3. Consider age, smoking, alcohol use, gender, and body metrics.
+4. Return ONLY valid JSON in the following structure:
+
+{{
+  "is_safe": boolean,
+  "warnings": [string],
+  "safe_medicines": [string],
+  "avoid_medicines": [string],
+  "recommended_specialist": string,
+  "patient_advice": string
+}}
+
+The "patient_advice" field should:
+- Be written in second person ("you")
+- Be clear, friendly, and supportive
+- Explain risks calmly
+- End with: 
+  "As an AI model, I can be wrong. Please consult a doctor before making medical decisions.".
+"""
+
+    # -----------------------
+    # Gemini call
+    # -----------------------
+    response = model.generate_content(prompt)
+
+    # Clean & parse Gemini output
+    validation = clean_json_text(response.text)
+
+    return jsonify({
+        "validation": validation,
+        "summary": summary_json
+    }), 200
+
+
+
 
 @api.route("/upload/<int:upload_id>/summary", methods=["GET"])
 @auth_required(roles=["patient","doctor"])
@@ -865,36 +1363,40 @@ def get_my_uploads():
 
     return jsonify(out), 200
 
-@api.route("/recommend", methods=["GET"])
+@api.route("/recommend-doctors", methods=["GET"])
 @auth_required(roles=["patient"])
 def recommend_doctors():
-    # 1) fetch patient city
-    user_city = request.current_user.city or request.args.get("city") or ""
+    # 1) patient city
+    user_city = request.current_user.city or ""
 
-    # 2) try to get recommended_specialist from latest summary
-    latest_summary = Summary.query \
-        .join(Upload, Upload.upload_id == Summary.upload_id) \
-        .filter(Upload.user_id == request.current_user.user_id) \
-        .order_by(Summary.created_at.desc()) \
+    # 2) get specialist from latest validated summary
+    latest_summary = (
+        Summary.query
+        .join(Upload, Upload.upload_id == Summary.upload_id)
+        .filter(Upload.user_id == request.current_user.user_id)
+        .order_by(Summary.created_at.desc())
         .first()
+    )
 
     recommended_specialist = None
+    condition = None
+
     if latest_summary:
         try:
             summary_json = json.loads(latest_summary.summary_text)
+            condition = summary_json.get("condition")
             recommended_specialist = summary_json.get("recommended_specialist")
         except Exception:
             pass
 
-    # 3) fallback: query param
-    if not recommended_specialist:
-        recommended_specialist = request.args.get("specialist")
+    # fallback: query params
+    recommended_specialist = (
+        request.args.get("specialist")
+        or recommended_specialist
+        or condition
+    )
 
-    condition = request.args.get("condition")
-    if not recommended_specialist and condition:
-        recommended_specialist = condition
-
-    # 4) build doctor query
+    # 3) query doctors
     q = (
         db.session.query(User, Doctor)
         .join(Doctor, Doctor.doctor_id == User.user_id)
@@ -902,86 +1404,40 @@ def recommend_doctors():
     )
 
     if recommended_specialist:
-        q = q.filter(Doctor.specialization.ilike(f"%{recommended_specialist}%"))
+        q = q.filter(
+            Doctor.specialization.ilike(f"%{recommended_specialist}%")
+        )
 
     q = q.order_by(Doctor.rating.desc())
 
-    results = []
+    doctors = []
     for user, doc in q.all():
-        results.append({
+        doctors.append({
             "doctor_id": user.user_id,
             "name": user.name,
-            "email": user.email,
             "phone": user.phone,
             "city": user.city,
             "specialization": doc.specialization,
             "rating": float(doc.rating or 0),
             "experience": int(doc.years_experience or 0),
             "clinicAddress": doc.clinic_address,
-            "consultationFee": float(doc.consultation_fee or 0)
+            "consultationFee": float(doc.consultation_fee or 0),
         })
 
-    # log recommendation
-    log = DoctorRecommendation(
-        user_id=request.current_user.user_id,
-        user_condition=recommended_specialist or condition,
-        city=user_city,
-        recommended_doctors=results
+    # 4) log recommendation
+    db.session.add(
+        DoctorRecommendation(
+            user_id=request.current_user.user_id,
+            user_condition=condition or recommended_specialist,
+            city=user_city,
+            recommended_doctors=doctors,
+        )
     )
-    db.session.add(log)
     db.session.commit()
 
-    return jsonify(results), 200
+    return jsonify(doctors), 200
 
-# -------------------------
-# Doctor profile & slots (single canonical implementations)
-# -------------------------
-@api.route("/doctor/<int:doctor_id>", methods=["GET"])
-@auth_required(roles=["patient","doctor"])
-def doctor_profile_route(doctor_id):
-    doc = Doctor.query.get(doctor_id)
-    if not doc:
-        return jsonify({"message": "Doctor not found"}), 404
-    user = User.query.get(doctor_id)
 
-    slots = DoctorSlot.query.filter_by(doctor_id=doctor_id).order_by(DoctorSlot.slot_start.asc()).all()
-    slots_out = [{
-        "slot_id": s.slot_id,
-        "slot_start": s.slot_start.isoformat(),
-        "slot_end": s.slot_end.isoformat(),
-        "is_booked": s.is_booked
-    } for s in slots]
-
-    doc_info = {
-        "doctor_id": doc.doctor_id,
-        "name": user.name if user else None,
-        "specialization": doc.specialization,
-        "rating": float(doc.rating or 0),
-        "years_experience": int(doc.years_experience or 0),
-        "languages": doc.languages or [],
-        "clinic_address": doc.clinic_address,
-        "city": user.city if user else None,
-        "consultation_fee": float(doc.consultation_fee or 0),
-        "bio": doc.bio,
-        "slots": slots_out
-    }
-    return jsonify(doc_info), 200
-
-@api.route("/doctor/<int:doctor_id>/slots", methods=["GET"])
-@auth_required(roles=["patient", "doctor"])
-def doctor_slots_route(doctor_id):
-    slots = DoctorSlot.query.filter_by(doctor_id=doctor_id).order_by(DoctorSlot.slot_start.asc()).all()
-
-    output = []
-    for s in slots:
-        output.append({
-            "slot_id": s.slot_id,
-            "slot_start": s.slot_start.isoformat(),
-            "slot_end": s.slot_end.isoformat(),
-            "is_booked": s.is_booked
-        })
-
-    return jsonify(output), 200
 
 @api.route("/slots/<int:slot_id>", methods=["GET"])
 @auth_required(roles=["patient", "doctor"])
@@ -1129,6 +1585,72 @@ def appointment_cancel_route(appointment_id):
         db.session.commit()
 
     return jsonify({"message": "Appointment cancelled"}), 200
+
+# -------------------------
+# Doctor: list own slots
+# -------------------------
+@api.route("/doctor/slots", methods=["GET"])
+@auth_required(roles=["doctor"])
+def doctor_slots_route():
+    slots = (
+        DoctorSlot.query
+        .filter_by(doctor_id=request.current_user.user_id)
+        .order_by(DoctorSlot.slot_start.asc())
+        .all()
+    )
+
+    out = []
+    for s in slots:
+        out.append({
+            "slot_id": s.slot_id,
+            "slot_start": s.slot_start.isoformat(),
+            "slot_end": s.slot_end.isoformat(),
+            "is_booked": s.is_booked
+        })
+
+    return jsonify(out), 200
+
+# -------------------------
+# Doctor: delete slot
+# -------------------------
+@api.route("/doctor/slots/<int:slot_id>", methods=["DELETE"])
+@auth_required(roles=["doctor"])
+def doctor_delete_slot_route(slot_id):
+    slot = DoctorSlot.query.get(slot_id)
+
+    if not slot or slot.doctor_id != request.current_user.user_id:
+        return jsonify({"message": "Slot not found"}), 404
+
+    if slot.is_booked:
+        return jsonify({"message": "Cannot delete booked slot"}), 400
+
+    db.session.delete(slot)
+    db.session.commit()
+    return jsonify({"message": "Slot deleted"}), 200
+
+# -------------------------
+# Get doctor slots (public: patient + doctor) new
+# -------------------------
+@api.route("/doctor/<int:doctor_id>/slots", methods=["GET"])
+@auth_required(roles=["patient", "doctor"])
+def doctor_slots_route1(doctor_id):
+    slots = (
+        DoctorSlot.query
+        .filter_by(doctor_id=doctor_id)
+        .order_by(DoctorSlot.slot_start.asc())
+        .all()
+    )
+
+    out = []
+    for s in slots:
+        out.append({
+            "slot_id": s.slot_id,
+            "slot_start": s.slot_start.isoformat(),
+            "slot_end": s.slot_end.isoformat(),
+            "is_booked": s.is_booked
+        })
+
+    return jsonify(out), 200
 
 # -------------------------
 # Serve uploaded files (protected)

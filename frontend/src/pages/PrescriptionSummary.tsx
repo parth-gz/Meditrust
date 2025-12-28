@@ -1,57 +1,63 @@
-import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Pill, Clock, AlertCircle, Stethoscope } from 'lucide-react';
-import api from '@/lib/axios';
-import Navbar from '@/components/Navbar';
-import Footer from '@/components/Footer';
-import LoadingSpinner from '@/components/LoadingSpinner';
-
-interface Medicine {
-  name: string;
-  dosage: string;
-  frequency: string;
-  duration: string;
-}
-
-interface Summary {
-  medicines: Medicine[];
-  condition: string;
-  explanation: string;
-}
+import { useEffect, useState } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import api from "@/lib/axios";
+import Navbar from "@/components/Navbar";
+import Footer from "@/components/Footer";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ShieldCheck, AlertTriangle, Loader2 } from "lucide-react";
 
 const PrescriptionSummary = () => {
   const { uploadId } = useParams();
   const navigate = useNavigate();
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+
+  const [summary, setSummary] = useState<any>(null);
+  const [validation, setValidation] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [isValidating, setIsValidating] = useState(false);
 
   useEffect(() => {
-    const fetchSummary = async () => {
-      try {
-        const response = await api.get(`/upload/${uploadId}/summary`);
-        setSummary(response.data);
-      } catch (error) {
-        console.error('Failed to fetch summary', error);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
     fetchSummary();
-  }, [uploadId]);
+  }, []);
 
-  if (isLoading) return <LoadingSpinner />;
+  const fetchSummary = async () => {
+    try {
+      const res = await api.get(`/upload/${uploadId}/summary`);
+      setSummary(res.data);
+    } catch (err) {
+      console.error("Failed to fetch summary");
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  if (!summary) {
+  const validatePrescription = async () => {
+    setIsValidating(true);
+    try {
+      const res = await api.post(`/prescription/${uploadId}/validate`);
+      setValidation(res.data.validation);
+    } catch (err) {
+      console.error("Validation failed");
+    } finally {
+      setIsValidating(false);
+    }
+  };
+
+  const proceedToDoctors = () => {
+    navigate("/doctor-recommendations", {
+      state: {
+        condition: summary.condition,
+        explanation: validation.patient_advice,
+        specialist: validation.recommended_specialist
+      }
+    });
+  };
+
+  if (loading) {
     return (
-      <div className="flex min-h-screen flex-col">
-        <Navbar />
-        <div className="flex flex-1 items-center justify-center">
-          <p className="text-muted-foreground">No summary found</p>
-        </div>
-        <Footer />
+      <div className="flex justify-center items-center min-h-screen">
+        <Loader2 className="h-6 w-6 animate-spin" />
       </div>
     );
   }
@@ -61,75 +67,85 @@ const PrescriptionSummary = () => {
       <Navbar />
 
       <main className="flex-1 bg-background py-8">
-        <div className="container mx-auto max-w-4xl px-4">
-          <div className="mb-8">
-            <h1 className="text-3xl font-bold text-foreground">Prescription Summary</h1>
-            <p className="text-muted-foreground">Analysis of your medical prescription</p>
-          </div>
+        <div className="container mx-auto max-w-3xl px-4 space-y-6">
 
-          {/* Condition Card */}
-          <Card className="mb-6 border-l-4 border-l-primary shadow-md">
+          {/* SUMMARY */}
+          <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <AlertCircle className="h-5 w-5 text-primary" />
-                Diagnosed Condition
-              </CardTitle>
+              <CardTitle>Prescription Summary</CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-lg font-semibold text-foreground">{summary.condition}</p>
-              <p className="mt-2 text-muted-foreground">{summary.explanation}</p>
-            </CardContent>
-          </Card>
+              <p className="font-semibold mb-2">Condition</p>
+              <p>{summary.condition}</p>
 
-          {/* Medicines List */}
-          <Card className="mb-6 shadow-md">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Pill className="h-5 w-5 text-primary" />
-                Prescribed Medicines
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                {summary.medicines.map((medicine, index) => (
-                  <div
-                    key={index}
-                    className="rounded-lg border border-border bg-secondary/30 p-4"
-                  >
-                    <h3 className="mb-2 text-lg font-semibold text-foreground">
-                      {medicine.name}
-                    </h3>
-                    <div className="grid gap-2 text-sm md:grid-cols-3">
-                      <div>
-                        <span className="font-medium text-muted-foreground">Dosage:</span>
-                        <p className="text-foreground">{medicine.dosage}</p>
-                      </div>
-                      <div>
-                        <span className="font-medium text-muted-foreground">Frequency:</span>
-                        <p className="text-foreground">{medicine.frequency}</p>
-                      </div>
-                      <div>
-                        <span className="font-medium text-muted-foreground">Duration:</span>
-                        <p className="text-foreground">{medicine.duration}</p>
-                      </div>
-                    </div>
-                  </div>
+              <p className="font-semibold mt-4 mb-2">Medicines</p>
+              <ul className="list-disc pl-5">
+                {summary.medicines?.map((m: any, idx: number) => (
+                  <li key={idx}>
+                    {m.name} — {m.dosage} ({m.frequency})
+                  </li>
                 ))}
-              </div>
+              </ul>
             </CardContent>
           </Card>
 
-          {/* CTA */}
-          <div className="flex justify-center">
+          {/* VALIDATE BUTTON */}
+          {!validation && (
             <Button
-              size="lg"
-              onClick={() => navigate(`/recommend/${summary.condition}`)}
-              className="gap-2"
+              className="w-full flex items-center justify-center gap-2"
+              onClick={validatePrescription}
+              disabled={isValidating}
             >
-              <Stethoscope className="h-5 w-5" />
-              Find a Doctor
+              {isValidating && <Loader2 className="h-4 w-4 animate-spin" />}
+              {isValidating ? "Validating prescription..." : "Validate Prescription"}
             </Button>
-          </div>
+          )}
+
+          {/* VALIDATION RESULT */}
+          {validation && (
+            <>
+              <Alert
+                variant={validation.is_safe ? "default" : "destructive"}
+                className="flex gap-3 items-start"
+              >
+                {validation.is_safe ? (
+                  <ShieldCheck className="h-5 w-5 text-green-600" />
+                ) : (
+                  <AlertTriangle className="h-5 w-5 text-red-600" />
+                )}
+                <AlertDescription>
+                  <strong>
+                    {validation.is_safe
+                      ? "Prescription appears safe"
+                      : "Potential safety issues detected"}
+                  </strong>
+                  <p className="mt-2">{validation.patient_advice}</p>
+                </AlertDescription>
+              </Alert>
+
+              {validation.warnings?.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-red-600">Warnings</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <ul className="list-disc pl-5">
+                      {validation.warnings.map((w: string, i: number) => (
+                        <li key={i}>{w}</li>
+                      ))}
+                    </ul>
+                  </CardContent>
+                </Card>
+              )}
+
+              <Button
+                className="w-full mt-4"
+                onClick={proceedToDoctors}
+              >
+                Find Recommended Doctors
+              </Button>
+            </>
+          )}
         </div>
       </main>
 

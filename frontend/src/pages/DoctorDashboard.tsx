@@ -9,6 +9,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 
+interface Slot {
+  slot_id: number;
+  slot_start: string;
+  slot_end: string;
+  is_booked: boolean;
+}
+
 interface Appointment {
   appointment_id: number;
   patient_name: string;
@@ -18,6 +25,7 @@ interface Appointment {
 }
 
 const DoctorDashboard = () => {
+  const [slots, setSlots] = useState<Slot[]>([]);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [newSlot, setNewSlot] = useState({
     date: "",
@@ -26,24 +34,18 @@ const DoctorDashboard = () => {
   });
 
   useEffect(() => {
+    loadSlots();
     loadAppointments();
   }, []);
+
+  const loadSlots = async () => {
+    const res = await api.get("/doctor/slots");
+    setSlots(res.data);
+  };
 
   const loadAppointments = async () => {
     const res = await api.get("/doctor/appointments");
     setAppointments(res.data);
-  };
-
-  const accept = async (id: number) => {
-    await api.post(`/appointments/${id}/accept`);
-    toast.success("Appointment accepted");
-    loadAppointments();
-  };
-
-  const cancel = async (id: number) => {
-    await api.post(`/appointments/${id}/cancel`);
-    toast.success("Appointment cancelled");
-    loadAppointments();
   };
 
   const addSlot = async () => {
@@ -58,6 +60,25 @@ const DoctorDashboard = () => {
 
     toast.success("Slot added");
     setNewSlot({ date: "", startTime: "", duration: 30 });
+    loadSlots();
+  };
+
+  const deleteSlot = async (slotId: number) => {
+    await api.delete(`/doctor/slots/${slotId}`);
+    toast.success("Slot deleted");
+    loadSlots();
+  };
+
+  const acceptAppointment = async (id: number) => {
+    await api.post(`/appointments/${id}/accept`);
+    toast.success("Appointment accepted");
+    loadAppointments();
+  };
+
+  const cancelAppointment = async (id: number) => {
+    await api.post(`/appointments/${id}/cancel`);
+    toast.success("Appointment cancelled");
+    loadAppointments();
   };
 
   return (
@@ -67,31 +88,27 @@ const DoctorDashboard = () => {
       <main className="flex-1 container mx-auto py-8 px-4">
         <h1 className="text-3xl font-bold mb-6">Doctor Dashboard</h1>
 
-        <div className="grid lg:grid-cols-2 gap-6">
-          {/* Appointments */}
+        <div className="grid lg:grid-cols-3 gap-6">
+
+          {/* Slots */}
           <Card>
             <CardHeader>
-              <CardTitle>Appointments</CardTitle>
+              <CardTitle>Your Slots</CardTitle>
             </CardHeader>
             <CardContent>
-              {appointments.map((a) => (
-                <Card key={a.appointment_id} className="p-4 mb-4">
-                  <p className="font-semibold">{a.patient_name}</p>
-                  <p>{a.date} at {a.time}</p>
-                  <p>Status: {a.status}</p>
+              {slots.map((s) => (
+                <Card key={s.slot_id} className="p-3 mb-3">
+                  <p>{new Date(s.slot_start).toLocaleString()}</p>
+                  <p>Status: {s.is_booked ? "Booked" : "Available"}</p>
 
-                  {a.status === "pending" && (
-                    <div className="mt-3 flex gap-2">
-                      <Button onClick={() => accept(a.appointment_id)}>
-                        Accept
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        onClick={() => cancel(a.appointment_id)}
-                      >
-                        Cancel
-                      </Button>
-                    </div>
+                  {!s.is_booked && (
+                    <Button
+                      variant="destructive"
+                      className="mt-2"
+                      onClick={() => deleteSlot(s.slot_id)}
+                    >
+                      Delete Slot
+                    </Button>
                   )}
                 </Card>
               ))}
@@ -103,7 +120,6 @@ const DoctorDashboard = () => {
             <CardHeader>
               <CardTitle>Add Slot</CardTitle>
             </CardHeader>
-
             <CardContent>
               <Input
                 type="date"
@@ -135,6 +151,37 @@ const DoctorDashboard = () => {
               </Button>
             </CardContent>
           </Card>
+
+          {/* Appointments */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Appointments</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {appointments.map((a) => (
+                <Card key={a.appointment_id} className="p-3 mb-3">
+                  <p className="font-semibold">{a.patient_name}</p>
+                  <p>{a.date} at {a.time}</p>
+                  <p>Status: {a.status}</p>
+
+                  {a.status === "pending" && (
+                    <div className="flex gap-2 mt-2">
+                      <Button onClick={() => acceptAppointment(a.appointment_id)}>
+                        Accept
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        onClick={() => cancelAppointment(a.appointment_id)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  )}
+                </Card>
+              ))}
+            </CardContent>
+          </Card>
+
         </div>
       </main>
 

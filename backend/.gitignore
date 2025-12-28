@@ -3,3 +3,4 @@ openfda_drugs.txt
 rag_builder.py
 prescription_pipeline.py
 rag_query.py
+uploads/
