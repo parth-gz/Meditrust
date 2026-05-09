@@ -32,7 +32,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 SECRET_KEY = os.environ.get("MEDITRUST_SECRET", "change_this_in_production")
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "mysql+pymysql://root:mysql_password@localhost/meditrust_plus"
+    "sqlite:///" + os.path.join(BASE_DIR, "meditrust.db")
 )
 
 JWT_EXP_SECONDS = 60 * 60 * 24 * 7  # 7 days
@@ -72,10 +72,10 @@ class User(db.Model):
     email = db.Column(db.String(150), unique=True, nullable=False)
     phone = db.Column(db.String(20))
     password_hash = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.Enum('patient', 'doctor'), nullable=False, default='patient')
+    role = db.Column(db.String(10), nullable=False, default='patient')
     city = db.Column(db.String(100))
     pincode = db.Column(db.String(10))
-    location_source = db.Column(db.Enum('user_input', 'ip', 'browser', 'map'), default='user_input')
+    location_source = db.Column(db.String(20), default='user_input')
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
@@ -98,7 +98,7 @@ class Doctor(db.Model):
     rating = db.Column(db.Float, default=0.0)
     bio = db.Column(db.Text)
     clinic_address = db.Column(db.Text)
-    languages = db.Column(db.JSON)  # MySQL JSON
+    languages = db.Column(db.Text)  # JSON string, e.g. '["Marathi","English"]'
     consultation_fee = db.Column(db.Numeric(10,2))
     verified = db.Column(db.Boolean, default=False)
 
@@ -107,21 +107,21 @@ class Upload(db.Model):
     upload_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.user_id"), nullable=False)
     file_path = db.Column(db.Text, nullable=False)
-    upload_type = db.Column(db.Enum('prescription', 'report'), nullable=False)
+    upload_type = db.Column(db.String(20), nullable=False)
     consent_cloud_ocr = db.Column(db.Boolean, default=False)
     ocr_text = db.Column(db.Text)
-    ocr_provider = db.Column(db.Enum('gemini', 'local'))
+    ocr_provider = db.Column(db.String(20))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
 class MedicalEntity(db.Model):
     __tablename__ = "medical_entities"
     entity_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     upload_id = db.Column(db.Integer, db.ForeignKey("uploads.upload_id"), nullable=False)
-    type = db.Column(db.Enum('DRUG','DOSAGE','FREQUENCY','DURATION','CONDITION'), nullable=False)
+    type = db.Column(db.String(20), nullable=False)
     text = db.Column(db.String(255), nullable=False)
     normalized_value = db.Column(db.String(255))
     confidence = db.Column(db.Float)
-    source = db.Column(db.Enum('med7','bioclinicalbert','regex','gemini'))
+    source = db.Column(db.String(20))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
 class Summary(db.Model):
@@ -139,7 +139,7 @@ class DoctorRecommendation(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("users.user_id"), nullable=False)
     user_condition = db.Column(db.String(255))
     city = db.Column(db.String(100))
-    recommended_doctors = db.Column(db.JSON)
+    recommended_doctors = db.Column(db.Text)  # JSON string
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
 class DoctorSlot(db.Model):
@@ -156,7 +156,7 @@ class Appointment(db.Model):
     patient_id = db.Column(db.Integer, db.ForeignKey("users.user_id"), nullable=False)
     doctor_id = db.Column(db.Integer, db.ForeignKey("doctors.doctor_id"), nullable=False)
     slot_id = db.Column(db.Integer, db.ForeignKey("doctor_slots.slot_id"), nullable=False)
-    status = db.Column(db.Enum('pending','confirmed','cancelled','completed'), default='pending')
+    status = db.Column(db.String(20), default='pending')
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
@@ -166,7 +166,7 @@ class Notification(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("users.user_id"), nullable=False)
     appointment_id = db.Column(db.Integer, db.ForeignKey("appointments.appointment_id"))
     message = db.Column(db.Text)
-    status = db.Column(db.Enum('pending','sent','failed'), default='pending')
+    status = db.Column(db.String(10), default='pending')
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
 # ---------- AUTH UTILITIES ----------
@@ -1120,7 +1120,7 @@ def doctor_profile_route(doctor_id):
         "specialization": doc.specialization,
         "rating": float(doc.rating or 0),
         "years_experience": int(doc.years_experience or 0),
-        "languages": doc.languages or [],
+        "languages": json.loads(doc.languages) if isinstance(doc.languages, str) else (doc.languages or []),
         "clinic_address": doc.clinic_address,
         "city": user.city if user else None,
         "consultation_fee": float(doc.consultation_fee or 0),

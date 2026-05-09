@@ -1,4 +1,8 @@
 backend/.env
 backend/test.py
+backend/meditrust.db
+backend/uploads/
 venv/
 frontend/node_modules
+__pycache__/
+*.pyc
