@@ -294,6 +294,54 @@ VALUES
 (52, 'Dermatologist', 7, 4.2, 'Specialist in cosmetic dermatology.', 'Kanse Skin Clinic, Ahmednagar', '["Marathi"]', 500, TRUE),
 (53, 'Dermatologist', 10, 4.5, 'Hair & skin specialist with laser treatment experience.', 'Kolhe Dermatology Center, Ahmednagar', '["Marathi","English"]', 650, TRUE);
 
+CREATE TABLE allergies (
+    allergy_id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL UNIQUE
+);
+CREATE TABLE user_allergies (
+    user_id INT NOT NULL,
+    allergy_id INT NOT NULL,
+    PRIMARY KEY (user_id, allergy_id),
+    CONSTRAINT fk_user_allergies_user
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_user_allergies_allergy
+        FOREIGN KEY (allergy_id) REFERENCES allergies(allergy_id)
+        ON DELETE CASCADE
+);
+CREATE TABLE user_conditions (
+    condition_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    conditn VARCHAR(255) NOT NULL,
+    CONSTRAINT fk_user_conditions_user
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+        ON DELETE CASCADE
+);
+INSERT INTO allergies (name) VALUES
+('Penicillin'),
+('Peanuts'),
+('Shellfish'),
+('Eggs'),
+('Milk'),
+('Soy'),
+('Wheat'),
+('Tree Nuts'),
+('Latex'),
+('Sulfa Drugs'),
+('NSAIDs'),
+('Aspirin'),
+('Ibuprofen'),
+('Sesame'),
+('Gluten'),
+('Dust Mites'),
+('Pollen'),
+('Pet Dander'),
+('Mold'),
+('Insect Stings'),
+('Contrast Dye');
+
+
+
 -- check last summary entry
 SELECT upload_id, summary_text 
 FROM summaries 
@@ -302,6 +350,9 @@ LIMIT 1;
 
 select * from doctors;
 select * from users;
+show tables;
 UPDATE doctors
 SET specialization = 'Dermatologist'
 WHERE doctor_id = 3;
+
+select * from user_allergies;

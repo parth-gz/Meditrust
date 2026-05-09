@@ -7,11 +7,11 @@ The app uses **SQLite** (no external database needed), making deployment straigh
 
 ## Architecture
 
-| Component | Technology | Hosting |
-|-----------|-----------|---------|
-| Frontend | React + Vite | **Vercel** (free) |
-| Backend | Flask + SQLite | **Render** (free) |
-| AI | Google Gemini API | API key |
+| Component | Technology | Hosting | URL |
+|-----------|-----------|---------|-----|
+| Frontend | React + Vite | **Vercel** (free) | [meditrust-eight.vercel.app](https://meditrust-eight.vercel.app) |
+| Backend | Flask + SQLite | **Render** (free) | [meditrust-backend-6rry.onrender.com](https://meditrust-backend-6rry.onrender.com) |
+| AI | Google Gemini API | API key | — |
 
 No external database server needed — SQLite is embedded and the `.db` file lives alongside the backend.
 
@@ -19,9 +19,9 @@ No external database server needed — SQLite is embedded and the `.db` file liv
 
 ## Step 1: Prepare the Code
 
-### 1. Update Frontend API URL
+### 1. Frontend API URL
 
-Edit `frontend/src/lib/axios.ts` to use an environment variable:
+`frontend/src/lib/axios.ts` reads from the `VITE_API_URL` environment variable:
 
 ```typescript
 const api = axios.create({
@@ -30,11 +30,37 @@ const api = axios.create({
 });
 ```
 
-### 2. Push to GitHub
+### 2. Backend CORS
+
+`backend/app.py` reads allowed origins from the `ALLOWED_ORIGINS` environment variable:
+
+```python
+ALLOWED_ORIGINS = [
+    o.strip() for o in
+    os.environ.get(
+        "ALLOWED_ORIGINS",
+        "http://localhost:8080,http://127.0.0.1:8080,https://meditrust-eight.vercel.app"
+    ).split(",")
+]
+```
+
+### 3. SPA Routing
+
+`frontend/vercel.json` ensures all routes are handled by React Router:
+
+```json
+{
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
+```
+
+### 4. Push to GitHub
 
 ```bash
 git add -A
-git commit -m "Switch to SQLite for deployment"
+git commit -m "Deploy to Vercel + Render"
 git push origin main
 ```
 
@@ -62,9 +88,10 @@ git push origin main
 |----------|-------|
 | `GEMINI_API_KEY` | Your Gemini API key |
 | `MEDITRUST_SECRET` | A strong random string for JWT signing |
+| `ALLOWED_ORIGINS` | `https://meditrust-eight.vercel.app,http://localhost:8080` |
 
 6. Click **Create Web Service**.
-7. Wait for the build. Once done, copy your URL (e.g., `https://meditrust-backend.onrender.com`).
+7. Wait for the build. Once done, your URL will be: `https://meditrust-backend-6rry.onrender.com`
 
 ---
 
@@ -84,36 +111,10 @@ git push origin main
 
 | Variable | Value |
 |----------|-------|
-| `VITE_API_URL` | `https://meditrust-backend.onrender.com/api` |
+| `VITE_API_URL` | `https://meditrust-backend-6rry.onrender.com/api` |
 
 6. Click **Deploy**.
-
----
-
-## Step 4: Update CORS (Important!)
-
-After deploying, update `backend/app.py` to allow your Vercel domain:
-
-```python
-CORS(app,
-     resources={r"/*": {
-         "origins": [
-             "http://localhost:8080",
-             "https://your-app.vercel.app",  # ← Add your Vercel URL here
-         ]
-     }},
-     supports_credentials=True)
-```
-
-Push the change and Render will auto-redeploy.
-
----
-
-## Step 5: Test
-
-1. Open your Vercel URL in a browser.
-2. Sign up a new account.
-3. Login and test the prescription/symptoms flow.
+7. Your URL will be: `https://meditrust-eight.vercel.app`
 
 ---
 
@@ -138,11 +139,12 @@ Open `http://localhost:8080`.
 ## Troubleshooting
 
 ### "Login failed" / Network error
-- Is the backend running? Check `http://localhost:5000/api/allergies` in a browser.
+- Is the backend running? Check `https://meditrust-backend-6rry.onrender.com/api/allergies` in a browser.
 - On Render: check the logs for errors.
 
 ### CORS errors in browser console
-- Make sure your Vercel URL is listed in the CORS `origins` list in `app.py`.
+- Make sure your Vercel URL is listed in the CORS `ALLOWED_ORIGINS` env var on Render.
+- The default in `app.py` already includes `https://meditrust-eight.vercel.app`.
 
 ### Render cold starts (30-50s delay)
 - Render's free tier sleeps after 15 minutes of inactivity.
