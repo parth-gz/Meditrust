@@ -45,13 +45,17 @@ if GEMINI_AVAILABLE and GEMINI_API_KEY:
 
 # ---------- APP & DB ----------
 app = Flask(__name__, static_folder=None)
+ALLOWED_ORIGINS = [
+    o.strip() for o in
+    os.environ.get(
+        "ALLOWED_ORIGINS",
+        "http://localhost:8080,http://127.0.0.1:8080,http://10.213.240.44:8080"
+    ).split(",")
+]
+
 CORS(app,
      resources={r"/*": {
-         "origins": [
-             "http://10.213.240.44:8080",   # other devices
-             "http://localhost:8080",       # your own PC local dev
-             "http://127.0.0.1:8080"        # alternate localhost
-         ]
+         "origins": ALLOWED_ORIGINS
      }},
      supports_credentials=True)
 
