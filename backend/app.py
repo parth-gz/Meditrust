@@ -480,31 +480,76 @@ def set_my_conditions():
     return jsonify({"message": "Conditions updated"}), 200
 
 # -------------------------
-# Save complete medical profile (allergies + conditions)
+# Save complete medical profile (allergies + conditions + vitals)
 # -------------------------
 @api.route("/medical-profile", methods=["POST"])
+@api.route("/me/medical-profile", methods=["POST"])
 @auth_required(roles=["patient"])
 def save_medical_profile():
     data = request.json or {}
-    allergy_ids = data.get("allergies", [])
+    raw_allergies = data.get("allergies", [])
     conditions = data.get("conditions", [])
 
     uid = request.current_user.user_id
 
+    # ---- Save core profile to user_medical_profile ----
+    try:
+        existing = db.session.execute(
+            text("SELECT user_id FROM user_medical_profile WHERE user_id = :uid"),
+            {"uid": uid}
+        ).fetchone()
+
+        profile_params = {
+            "uid": uid,
+            "dob": data.get("date_of_birth") or None,
+            "gender": data.get("gender") or None,
+            "blood_group": data.get("blood_group") or None,
+            "height_cm": int(data["height_cm"]) if data.get("height_cm") else None,
+            "weight_kg": int(data["weight_kg"]) if data.get("weight_kg") else None,
+            "is_smoker": bool(data.get("is_smoker", False)),
+            "alcohol_use": bool(data.get("alcohol_use", False)),
+        }
+
+        if existing:
+            db.session.execute(
+                text("""
+                    UPDATE user_medical_profile
+                    SET date_of_birth = :dob, gender = :gender, blood_group = :blood_group,
+                        height_cm = :height_cm, weight_kg = :weight_kg,
+                        is_smoker = :is_smoker, alcohol_use = :alcohol_use
+                    WHERE user_id = :uid
+                """),
+                profile_params
+            )
+        else:
+            db.session.execute(
+                text("""
+                    INSERT INTO user_medical_profile
+                        (user_id, date_of_birth, gender, blood_group, height_cm, weight_kg, is_smoker, alcohol_use)
+                    VALUES (:uid, :dob, :gender, :blood_group, :height_cm, :weight_kg, :is_smoker, :alcohol_use)
+                """),
+                profile_params
+            )
+    except Exception:
+        app.logger.exception("Failed to save user_medical_profile (table may not exist)")
+
     # ---- Allergies ----
+    # Frontend sends allergies as [{id, name}, ...] — extract the id
     db.session.execute(
         text("DELETE FROM user_allergies WHERE user_id = :uid"),
         {"uid": uid}
     )
 
-    for aid in allergy_ids:
-        db.session.execute(
-            text("""
-                INSERT INTO user_allergies (user_id, allergy_id)
-                VALUES (:uid, :aid)
-            """),
-            {"uid": uid, "aid": aid}
-        )
+    for allergy in raw_allergies:
+        aid = allergy.get("id") if isinstance(allergy, dict) else allergy
+        if aid:
+            db.session.execute(
+                text("""
+                    INSERT INTO user_allergies (user_id, allergy_id)
+                    VALUES (:uid, :aid)
+                """),
+                {"uid": uid, "aid": aid}
+            )
 
     # ---- Conditions ----
     db.session.execute(
@@ -513,7 +558,8 @@ def save_medical_profile():
     )
 
     for c in conditions:
-        c = c.strip()
+        if isinstance(c, str):
+            c = c.strip()
         if c:
             db.session.execute(
                 text("""
@@ -731,6 +777,122 @@ def get_summary(upload_id):
         return jsonify(json.loads(summary.summary_text)), 200
     except Exception:
         return jsonify({"summary_text": summary.summary_text}), 200
+
+# -------------------------
+# Validate prescription against patient allergies/conditions
+# -------------------------
+@api.route("/prescription/<int:upload_id>/validate", methods=["POST"])
+@auth_required(roles=["patient"])
+def validate_prescription(upload_id):
+    upload = Upload.query.get(upload_id)
+    if not upload:
+        return jsonify({"message": "Upload not found"}), 404
+    if upload.user_id != request.current_user.user_id:
+        return jsonify({"message": "Forbidden"}), 403
+
+    # Get prescription summary
+    summary = Summary.query.filter_by(upload_id=upload_id).first()
+    if not summary:
+        return jsonify({"message": "No summary available"}), 404
+
+    try:
+        summary_data = json.loads(summary.summary_text)
+    except Exception:
+        summary_data = {"medicines": [], "condition": "Unknown"}
+
+    medicines = summary_data.get("medicines", [])
+    condition = summary_data.get("condition", "Unknown")
+
+    # Get patient's allergies
+    uid = request.current_user.user_id
+    allergy_rows = db.session.execute(
+        text("""
+            SELECT a.name FROM user_allergies ua
+            JOIN allergies a ON a.allergy_id = ua.allergy_id
+            WHERE ua.user_id = :uid
+        """),
+        {"uid": uid}
+    ).scalars().all()
+    patient_allergies = list(allergy_rows) if allergy_rows else []
+
+    # Get patient's conditions
+    condition_rows = db.session.execute(
+        text("SELECT conditn FROM user_conditions WHERE user_id = :uid"),
+        {"uid": uid}
+    ).scalars().all()
+    patient_conditions = list(condition_rows) if condition_rows else []
+
+    # Build medicine names list
+    med_names = [m.get("name", "") for m in medicines if isinstance(m, dict)]
+
+    # If Gemini is available, use AI validation
+    if GEMINI_AVAILABLE and GEMINI_API_KEY:
+        try:
+            model = genai.GenerativeModel(GEMINI_MODEL)
+            prompt = f"""
+You are a pharmacist assistant AI. Check if the following prescription is safe for the patient.
+
+Prescribed medicines: {json.dumps(med_names)}
+Prescribed condition: {condition}
+Patient allergies: {json.dumps(patient_allergies)}
+Patient existing conditions: {json.dumps(patient_conditions)}
+
+Your task:
+1. Check if any prescribed medicine conflicts with the patient's ALLERGIES.
+2. Check if any medicine may be unsafe given the patient's EXISTING CONDITIONS.
+3. Provide a safety verdict and advice.
+
+Return STRICT JSON with keys:
+- is_safe: boolean (true if no major conflicts found)
+- warnings: list of strings (each warning about a potential conflict)
+- patient_advice: string (2-3 sentence patient-friendly advice)
+- recommended_specialist: string (the type of specialist the patient should consult)
+
+Example:
+{{
+  "is_safe": false,
+  "warnings": ["Ibuprofen may trigger allergic reaction in patients allergic to NSAIDs"],
+  "patient_advice": "Please consult your doctor before taking this prescription. One of the medicines may conflict with your known allergies.",
+  "recommended_specialist": "General Physician"
+}}
+"""
+            response = model.generate_content(prompt)
+            analysis_text = response.text if hasattr(response, "text") else str(response)
+            result = clean_json_text(analysis_text)
+
+            return jsonify({
+                "validation": {
+                    "is_safe": result.get("is_safe", True),
+                    "warnings": result.get("warnings", []),
+                    "patient_advice": result.get("patient_advice", "Please consult your doctor."),
+                    "recommended_specialist": result.get("recommended_specialist",
+                                                         summary_data.get("recommended_specialist", "General Physician"))
+                }
+            }), 200
+
+        except Exception:
+            app.logger.exception("Gemini validation failed, falling back to basic check")
+
+    # Fallback: basic string-matching validation (no AI)
+    warnings = []
+    for med in med_names:
+        for allergy in patient_allergies:
+            if allergy.lower() in med.lower() or med.lower() in allergy.lower():
+                warnings.append(f"{med} may conflict with your allergy to {allergy}")
+
+    is_safe = len(warnings) == 0
+    return jsonify({
+        "validation": {
+            "is_safe": is_safe,
+            "warnings": warnings,
+            "patient_advice": (
+                "No conflicts detected. This prescription appears safe for you."
+                if is_safe else
+                "Potential conflicts were found. Please consult your doctor before taking these medicines."
+            ),
+            "recommended_specialist": summary_data.get("recommended_specialist", "General Physician")
+        }
+    }), 200
 
 @api.route("/upload-multiple", methods=["POST"])
 @auth_required(roles=["patient", "doctor"])

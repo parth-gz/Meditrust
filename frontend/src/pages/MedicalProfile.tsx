@@ -3,6 +3,10 @@ import { useNavigate } from "react-router-dom";
 import api from "@/lib/axios";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 
 interface Allergy {
@@ -11,195 +15,223 @@ interface Allergy {
 }
 
 interface SelectedAllergy {
-  allergy_id?: number; // undefined = newly added
+  id?: number;
   name: string;
 }
 
-const MedicalProfile = () => {
+export default function MedicalProfile() {
   const navigate = useNavigate();
 
+  // Core profile
+  const [dob, setDob] = useState("");
+  const [gender, setGender] = useState("");
+  const [bloodGroup, setBloodGroup] = useState("");
+  const [height, setHeight] = useState("");
+  const [weight, setWeight] = useState("");
+  const [smoker, setSmoker] = useState(false);
+  const [alcohol, setAlcohol] = useState(false);
+
+  // Allergies
   const [allergies, setAllergies] = useState<Allergy[]>([]);
   const [selected, setSelected] = useState<SelectedAllergy[]>([]);
   const [query, setQuery] = useState("");
-  const [showDropdown, setShowDropdown] = useState(false);
+
+  // Conditions
   const [conditions, setConditions] = useState("");
-  const [isSaving, setIsSaving] = useState(false);
 
-  // ----------------------------
-  // Load allergies from backend
-  // ----------------------------
+  const [saving, setSaving] = useState(false);
+
   useEffect(() => {
-    const fetchAllergies = async () => {
-      try {
-        const res = await api.get("/allergies");
-        setAllergies(res.data);
-      } catch {
-        toast.error("Failed to load allergies");
-      }
-    };
-
-    fetchAllergies();
+    api.get("/allergies").then(res => setAllergies(res.data));
   }, []);
 
-  // ----------------------------
-  // Filter suggestions
-  // ----------------------------
-  const filtered = allergies.filter(
-    (a) =>
+  const suggestions = allergies.filter(
+    a =>
       a.name.toLowerCase().includes(query.toLowerCase()) &&
-      !selected.some((s) => s.name.toLowerCase() === a.name.toLowerCase())
+      !selected.some(s => s.name.toLowerCase() === a.name.toLowerCase())
   );
 
-  // ----------------------------
-  // Save medical profile
-  // ----------------------------
-  const handleSave = async () => {
-    if (selected.length === 0 && !conditions.trim()) {
-      toast.error("Please add at least one allergy or condition");
+  const saveProfile = async () => {
+    if (!dob || !gender || !bloodGroup) {
+      toast.error("Please complete required fields");
       return;
     }
 
-    setIsSaving(true);
-
+    setSaving(true);
     try {
-      const existingIds = selected
-        .filter((a) => a.allergy_id)
-        .map((a) => a.allergy_id);
-
-      const newAllergies = selected
-        .filter((a) => !a.allergy_id)
-        .map((a) => a.name);
-
-      const conditionList = conditions
-        .split(",")
-        .map((c) => c.trim())
-        .filter(Boolean);
-
-      await api.post("/medical-profile", {
-        allergies: existingIds,
-        new_allergies: newAllergies,
-        conditions: conditionList,
+      await api.post("/me/medical-profile", {
+        date_of_birth: dob,
+        gender,
+        blood_group: bloodGroup,
+        height_cm: height ? Number(height) : null,
+        weight_kg: weight ? Number(weight) : null,
+        is_smoker: smoker,
+        alcohol_use: alcohol,
+        allergies: selected.map(a => ({
+          id: a.id,
+          name: a.name,
+        })),
+        conditions: conditions
+          .split(",")
+          .map(c => c.trim())
+          .filter(Boolean),
       });
 
       toast.success("Medical profile saved");
       navigate("/choose-action");
     } catch {
-      toast.error("Failed to save medical profile");
+      toast.error("Failed to save profile");
     } finally {
-      setIsSaving(false);
+      setSaving(false);
     }
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-      <Card className="w-full max-w-xl">
+    <div className="min-h-screen bg-muted flex items-center justify-center p-6">
+      <Card className="w-full max-w-3xl shadow-lg">
         <CardHeader>
-          <CardTitle>Medical Profile</CardTitle>
+          <CardTitle className="text-2xl">Medical Profile</CardTitle>
           <p className="text-sm text-muted-foreground">
-            This information helps us keep you safe and recommend the right
-            doctors.
+            This information helps us validate prescriptions and recommend the right doctors.
           </p>
         </CardHeader>
 
-        <CardContent className="space-y-6">
-          {/* ---------------- Allergies ---------------- */}
-          <div>
-            <label className="block font-medium mb-2">Known Allergies</label>
+        <CardContent className="space-y-8">
+          {/* BASIC INFO */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <Label>Date of Birth</Label>
+              <Input type="date" value={dob} onChange={e => setDob(e.target.value)} />
+            </div>
 
-            {/* Selected tags */}
-            <div className="flex flex-wrap gap-2 mb-2">
-              {selected.map((a, idx) => (
-                <span
-                  key={idx}
-                  className="flex items-center gap-2 rounded-full bg-blue-100 px-3 py-1 text-sm text-blue-800"
+            <div>
+              <Label>Gender</Label>
+              <select
+                className="w-full rounded-md border px-3 py-2"
+                value={gender}
+                onChange={e => setGender(e.target.value)}
+              >
+                <option value="">Select</option>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+              </select>
+            </div>
+
+            <div>
+              <Label>Blood Group</Label>
+              <select
+                className="w-full rounded-md border px-3 py-2"
+                value={bloodGroup}
+                onChange={e => setBloodGroup(e.target.value)}
+              >
+                <option value="">Select</option>
+                {["A+","A-","B+","B-","AB+","AB-","O+","O-"].map(bg => (
+                  <option key={bg} value={bg}>{bg}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <Label>Height (cm)</Label>
+              <Input value={height} onChange={e => setHeight(e.target.value)} />
+            </div>
+
+            <div>
+              <Label>Weight (kg)</Label>
+              <Input value={weight} onChange={e => setWeight(e.target.value)} />
+            </div>
+          </div>
+
+          {/* LIFESTYLE */}
+          <div className="flex gap-10">
+            <div className="flex items-center gap-3">
+              <Switch checked={smoker} onCheckedChange={setSmoker} />
+              <Label>Smoker</Label>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <Switch checked={alcohol} onCheckedChange={setAlcohol} />
+              <Label>Alcohol use</Label>
+            </div>
+          </div>
+
+          {/* ALLERGIES */}
+          <div>
+            <Label>Known Allergies</Label>
+            <div className="flex flex-wrap gap-2 mt-2">
+              {selected.map((a, i) => (
+                <Badge
+                  key={i}
+                  variant="secondary"
+                  className="cursor-pointer"
+                  onClick={() =>
+                    setSelected(selected.filter((_, idx) => idx !== i))
+                  }
                 >
-                  {a.name}
-                  <button
-                    onClick={() =>
-                      setSelected(selected.filter((_, i) => i !== idx))
-                    }
-                    className="text-xs font-bold"
-                  >
-                    ✕
-                  </button>
-                </span>
+                  {a.name} ✕
+                </Badge>
               ))}
             </div>
 
-            {/* Search input */}
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => {
-                setQuery(e.target.value);
-                setShowDropdown(true);
-              }}
+            <Input
+              className="mt-3"
               placeholder="Search or add allergy"
-              className="w-full rounded border px-3 py-2"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
             />
 
-            {/* Dropdown */}
-            {showDropdown && query && (
-              <div className="mt-1 max-h-40 overflow-y-auto rounded border bg-white">
-                {filtered.map((a) => (
+            {query && (
+              <div className="mt-2 border rounded-md bg-background max-h-40 overflow-y-auto">
+                {suggestions.map(a => (
                   <div
                     key={a.allergy_id}
-                    className="cursor-pointer px-3 py-2 hover:bg-gray-100"
+                    className="px-3 py-2 hover:bg-muted cursor-pointer"
                     onClick={() => {
-                      setSelected([...selected, a]);
+                      setSelected([...selected, { id: a.allergy_id, name: a.name }]);
                       setQuery("");
-                      setShowDropdown(false);
                     }}
                   >
                     {a.name}
                   </div>
                 ))}
 
-                {filtered.length === 0 && (
+                {suggestions.length === 0 && (
                   <div
-                    className="cursor-pointer px-3 py-2 text-blue-600 hover:bg-gray-100"
+                    className="px-3 py-2 text-sm text-primary cursor-pointer"
                     onClick={() => {
                       setSelected([...selected, { name: query }]);
                       setQuery("");
-                      setShowDropdown(false);
                     }}
                   >
-                    ➕ Add “{query}”
+                    Add “{query}”
                   </div>
                 )}
               </div>
             )}
           </div>
 
-          {/* ---------------- Conditions ---------------- */}
+          {/* CONDITIONS */}
           <div>
-            <label className="block font-medium mb-2">
-              Existing Conditions
-            </label>
+            <Label>Existing Conditions</Label>
             <textarea
-              value={conditions}
-              onChange={(e) => setConditions(e.target.value)}
-              placeholder="Example: Diabetes, Hypertension, Asthma"
-              className="w-full rounded border px-3 py-2"
+              className="w-full mt-2 rounded-md border px-3 py-2"
               rows={3}
+              placeholder="Diabetes, Asthma"
+              value={conditions}
+              onChange={e => setConditions(e.target.value)}
             />
             <p className="text-xs text-muted-foreground mt-1">
               Separate multiple conditions with commas
             </p>
           </div>
 
-          {/* ---------------- Save ---------------- */}
-          <Button
-            className="w-full"
-            onClick={handleSave}
-            disabled={isSaving}
-          >
-            {isSaving ? "Saving..." : "Save Medical Profile"}
-          </Button>
+          <div className="pt-4">
+            <Button className="w-full md:w-auto" onClick={saveProfile} disabled={saving}>
+              {saving ? "Saving..." : "Save & Continue"}
+            </Button>
+          </div>
         </CardContent>
       </Card>
     </div>
   );
-};
-
-export default MedicalProfile;
+}
